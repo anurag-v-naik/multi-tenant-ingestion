@@ -825,21 +825,21 @@ deployment_strategies:
 
 ```mermaid
 graph TD
-    subgraph "Primary Region (us-east-1)"
+    subgraph Primary["Primary Region us-east-1"]
         PRIMARY_ECS[ECS Cluster]
         PRIMARY_RDS[RDS Primary]
         PRIMARY_S3[S3 Primary]
         PRIMARY_DATABRICKS[Databricks Primary]
     end
     
-    subgraph "DR Region (us-west-2)"
-        DR_ECS[ECS Cluster (Standby)]
+    subgraph DR["DR Region us-west-2"]
+        DR_ECS[ECS Cluster Standby]
         DR_RDS[RDS Read Replica]
         DR_S3[S3 Cross-Region Replication]
         DR_DATABRICKS[Databricks DR]
     end
     
-    subgraph "Backup Strategy"
+    subgraph Backup["Backup Strategy"]
         BACKUP_RDS[Automated DB Backups]
         BACKUP_S3[S3 Versioning]
         BACKUP_CONFIG[Configuration Backups]
