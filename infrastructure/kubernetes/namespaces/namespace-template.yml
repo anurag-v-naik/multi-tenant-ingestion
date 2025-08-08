@@ -1,0 +1,235 @@
+# infrastructure/kubernetes/namespaces/namespace-template.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${ORGANIZATION_NAME}
+  labels:
+    app.kubernetes.io/name: multi-tenant-ingestion
+    app.kubernetes.io/component: tenant-namespace
+    organization: ${ORGANIZATION_NAME}
+    compliance-level: ${COMPLIANCE_LEVEL}
+    cost-center: ${COST_CENTER}
+  annotations:
+    multi-tenant.io/organization-id: ${ORGANIZATION_NAME}
+    multi-tenant.io/created-at: ${CREATED_AT}
+    multi-tenant.io/resource-quotas: ${RESOURCE_QUOTAS}
+---
+# Resource Quota for the organization
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: ${ORGANIZATION_NAME}-quota
+  namespace: ${ORGANIZATION_NAME}
+  labels:
+    organization: ${ORGANIZATION_NAME}
+spec:
+  hard:
+    requests.cpu: ${CPU_REQUESTS_LIMIT}
+    requests.memory: ${MEMORY_REQUESTS_LIMIT}
+    limits.cpu: ${CPU_LIMITS_LIMIT}
+    limits.memory: ${MEMORY_LIMITS_LIMIT}
+    persistentvolumeclaims: ${PVC_LIMIT}
+    services: ${SERVICES_LIMIT}
+    secrets: ${SECRETS_LIMIT}
+    configmaps: ${CONFIGMAPS_LIMIT}
+    pods: ${PODS_LIMIT}
+---
+# Network Policy for tenant isolation
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ${ORGANIZATION_NAME}-network-policy
+  namespace: ${ORGANIZATION_NAME}
+  labels:
+    organization: ${ORGANIZATION_NAME}
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    - podSelector: {}
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+---
+# Service Account for organization workloads
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ${ORGANIZATION_NAME}-service-account
+  namespace: ${ORGANIZATION_NAME}
+  labels:
+    organization: ${ORGANIZATION_NAME}
+automountServiceAccountToken: true
+---
+# Role for organization-specific permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ${ORGANIZATION_NAME}-role
+  namespace: ${ORGANIZATION_NAME}
+  labels:
+    organization: ${ORGANIZATION_NAME}
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets", "persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: ["monitoring.coreos.com"]
+  resources: ["servicemonitors", "prometheusrules"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+# RoleBinding to bind the role to the service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ${ORGANIZATION_NAME}-role-binding
+  namespace: ${ORGANIZATION_NAME}
+  labels:
+    organization: ${ORGANIZATION_NAME}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ${ORGANIZATION_NAME}-role
+subjects:
+- kind: ServiceAccount
+  name: ${ORGANIZATION_NAME}-service-account
+  namespace: ${ORGANIZATION_NAME}
+---
+# ClusterRole for cross-namespace operations (if needed)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ${ORGANIZATION_NAME}-cluster-role
+  labels:
+    organization: ${ORGANIZATION_NAME}
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "persistentvolumes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["pods", "nodes"]
+  verbs: ["get", "list"]
+- apiGroups: ["storage.k8s.io"]
+  resources: ["storageclasses"]
+  verbs: ["get", "list", "watch"]
+---
+# ClusterRoleBinding for cluster-level permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ${ORGANIZATION_NAME}-cluster-role-binding
+  labels:
+    organization: ${ORGANIZATION_NAME}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ${ORGANIZATION_NAME}-cluster-role
+subjects:
+- kind: ServiceAccount
+  name: ${ORGANIZATION_NAME}-service-account
+  namespace: ${ORGANIZATION_NAME}
+---
+# Pod Security Policy (if enabled in cluster)
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: ${ORGANIZATION_NAME}-psp
+  labels:
+    organization: ${ORGANIZATION_NAME}
+spec:
+  privileged: false
+  allowPrivilegeEscalation: false
+  requiredDropCapabilities:
+    - ALL
+  volumes:
+    - 'configMap'
+    - 'emptyDir'
+    - 'projected'
+    - 'secret'
+    - 'downwardAPI'
+    - 'persistentVolumeClaim'
+  runAsUser:
+    rule: 'MustRunAsNonRoot'
+  seLinux:
+    rule: 'RunAsAny'
+  fsGroup:
+    rule: 'RunAsAny'
+---
+# Limit Range for resource constraints
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: ${ORGANIZATION_NAME}-limit-range
+  namespace: ${ORGANIZATION_NAME}
+  labels:
+    organization: ${ORGANIZATION_NAME}
+spec:
+  limits:
+  - type: Container
+    default:
+      cpu: ${DEFAULT_CPU_LIMIT}
+      memory: ${DEFAULT_MEMORY_LIMIT}
+    defaultRequest:
+      cpu: ${DEFAULT_CPU_REQUEST}
+      memory: ${DEFAULT_MEMORY_REQUEST}
+    max:
+      cpu: ${MAX_CPU_LIMIT}
+      memory: ${MAX_MEMORY_LIMIT}
+    min:
+      cpu: ${MIN_CPU_REQUEST}
+      memory: ${MIN_MEMORY_REQUEST}
+  - type: Pod
+    max:
+      cpu: ${POD_MAX_CPU}
+      memory: ${POD_MAX_MEMORY}
+  - type: PersistentVolumeClaim
+    max:
+      storage: ${MAX_PVC_SIZE}
+    min:
+      storage: ${MIN_PVC_SIZE}
+---
+# Priority Class for organization workloads
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: ${ORGANIZATION_NAME}-priority
+  labels:
+    organization: ${ORGANIZATION_NAME}
+value: ${PRIORITY_VALUE}
+globalDefault: false
+description: "Priority class for ${ORGANIZATION_NAME} workloads"
