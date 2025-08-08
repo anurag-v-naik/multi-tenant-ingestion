@@ -1,29 +1,36 @@
-# docker-compose.yml
+# Multi-Tenant Data Ingestion Framework
+# Local Development Environment with Docker Compose
+
 version: '3.8'
 
 services:
-  # Database Services
+  # PostgreSQL Database
   postgres:
-    image: postgres:14
+    image: postgres:15-alpine
+    container_name: multi-tenant-postgres
     environment:
-      POSTGRES_DB: multitenantdb
-      POSTGRES_USER: dbadmin
-      POSTGRES_PASSWORD: password123
+      POSTGRES_DB: multi_tenant_ingestion
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./scripts/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     networks:
       - multi-tenant-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U dbadmin -d multitenantdb"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
       retries: 5
 
+  # Redis Cache
   redis:
     image: redis:7-alpine
+    container_name: multi-tenant-redis
+    command: redis-server --appendonly yes --requirepass redis123
     ports:
       - "6379:6379"
     volumes:
@@ -31,22 +38,24 @@ services:
     networks:
       - multi-tenant-network
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
       retries: 5
 
-  # Core Services
+  # Pipeline Service
   pipeline-service:
     build:
       context: ./services/pipeline-service
       dockerfile: Dockerfile
+    container_name: pipeline-service
     environment:
-      - DATABASE_URL=postgresql://dbadmin:password123@postgres:5432/pipeline_db
-      - REDIS_URL=redis://redis:6379/0
-      - DATABRICKS_HOST=${DATABRICKS_HOST}
-      - DATABRICKS_TOKEN=${DATABRICKS_TOKEN}
-      - DATABRICKS_WAREHOUSE_ID=${DATABRICKS_WAREHOUSE_ID}
+      - DATABASE_URL=postgresql://postgres:postgres123@postgres:5432/multi_tenant_ingestion
+      - REDIS_URL=redis://:redis123@redis:6379/0
+      - JWT_SECRET_KEY=dev-jwt-secret-key
+      - DATABRICKS_TOKEN_FINANCE=dapi-finance-token
+      - DATABRICKS_TOKEN_RETAIL=dapi-retail-token
+      - DATABRICKS_TOKEN_HEALTHCARE=dapi-healthcare-token
     ports:
       - "8000:8000"
     depends_on:
@@ -58,50 +67,48 @@ services:
       - multi-tenant-network
     volumes:
       - ./services/pipeline-service:/app
+    command: ["python", "app/main.py"]
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
+  # Catalog Service
   catalog-service:
     build:
       context: ./services/catalog-service
       dockerfile: Dockerfile
+    container_name: catalog-service
     environment:
-      - DATABASE_URL=postgresql://dbadmin:password123@postgres:5432/catalog_db
-      - DATABRICKS_HOST=${DATABRICKS_HOST}
-      - DATABRICKS_TOKEN=${DATABRICKS_TOKEN}
-      - S3_DATA_BUCKET=multi-tenant-data-local
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - DATABASE_URL=postgresql://postgres:postgres123@postgres:5432/multi_tenant_ingestion
+      - JWT_SECRET_KEY=dev-jwt-secret-key
+      - AWS_ACCESS_KEY_ID=minioadmin
+      - AWS_SECRET_ACCESS_KEY=minioadmin
+      - AWS_ENDPOINT_URL=http://minio:9000
+      - DATABRICKS_TOKEN_FINANCE=dapi-finance-token
+      - DATABRICKS_TOKEN_RETAIL=dapi-retail-token
+      - DATABRICKS_TOKEN_HEALTHCARE=dapi-healthcare-token
     ports:
       - "8001:8001"
     depends_on:
       postgres:
         condition: service_healthy
+      minio:
+        condition: service_healthy
     networks:
       - multi-tenant-network
     volumes:
       - ./services/catalog-service:/app
+    command: ["python", "app/main.py"]
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
+  # Connector Service
   connector-service:
     build:
       context: ./services/connector-service
       dockerfile: Dockerfile
+    container_name: connector-service
     environment:
-      - DATABASE_URL=postgresql://dbadmin:password123@postgres:5432/connector_db
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - DATABASE_URL=postgresql://postgres:postgres123@postgres:5432/multi_tenant_ingestion
+      - JWT_SECRET_KEY=dev-jwt-secret-key
+      - ENCRYPTION_KEY=dev-encryption-key-32-chars-long
     ports:
       - "8002:8002"
     depends_on:
@@ -111,47 +118,63 @@ services:
       - multi-tenant-network
     volumes:
       - ./services/connector-service:/app
+    command: ["python", "app/main.py"]
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
+  # Data Quality Service
   data-quality-service:
     build:
       context: ./services/data-quality-service
       dockerfile: Dockerfile
+    container_name: data-quality-service
     environment:
-      - DATABASE_URL=postgresql://dbadmin:password123@postgres:5432/dq_db
-      - DATABRICKS_HOST=${DATABRICKS_HOST}
-      - DATABRICKS_TOKEN=${DATABRICKS_TOKEN}
-      - DATABRICKS_WAREHOUSE_ID=${DATABRICKS_WAREHOUSE_ID}
+      - DATABASE_URL=postgresql://postgres:postgres123@postgres:5432/multi_tenant_ingestion
+      - REDIS_URL=redis://:redis123@redis:6379/0
+      - JWT_SECRET_KEY=dev-jwt-secret-key
     ports:
       - "8003:8003"
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - multi-tenant-network
     volumes:
       - ./services/data-quality-service:/app
+    command: ["python", "app/main.py"]
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 
-  # API Gateway / Load Balancer
-  nginx:
-    image: nginx:alpine
+  # React UI
+  ui:
+    build:
+      context: ./services/ui
+      dockerfile: Dockerfile
+    container_name: multi-tenant-ui
+    environment:
+      - REACT_APP_API_BASE_URL=http://localhost:8080
+      - REACT_APP_ENVIRONMENT=development
     ports:
-      - "80:80"
-      - "443:443"
+      - "3000:3000"
+    depends_on:
+      - api-gateway
+    networks:
+      - multi-tenant-network
+    volumes:
+      - ./services/ui:/app
+      - /app/node_modules
+    command: ["npm", "start"]
+    restart: unless-stopped
+
+  # API Gateway (Nginx)
+  api-gateway:
+    image: nginx:alpine
+    container_name: api-gateway
+    ports:
+      - "8080:80"
     volumes:
       - ./deployment/nginx/nginx.conf:/etc/nginx/nginx.conf
-      - ./deployment/nginx/ssl:/etc/nginx/ssl
+      - ./deployment/nginx/conf.d:/etc/nginx/conf.d
     depends_on:
       - pipeline-service
       - catalog-service
@@ -161,161 +184,105 @@ services:
       - multi-tenant-network
     restart: unless-stopped
 
-  # Frontend Application
-  ui:
-    build:
-      context: ./services/ui
-      dockerfile: Dockerfile
-    environment:
-      - REACT_APP_API_BASE_URL=http://localhost
-      - REACT_APP_ENABLE_MOCK_DATA=true
-    ports:
-      - "3000:3000"
-    depends_on:
-      - nginx
-    networks:
-      - multi-tenant-network
-    volumes:
-      - ./services/ui:/app
-      - /app/node_modules
-    restart: unless-stopped
-
-  # Development Tools
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@example.com
-      PGADMIN_DEFAULT_PASSWORD: admin123
-      PGADMIN_CONFIG_SERVER_MODE: 'False'
-    ports:
-      - "5050:80"
-    depends_on:
-      - postgres
-    networks:
-      - multi-tenant-network
-    volumes:
-      - pgadmin_data:/var/lib/pgadmin
-
-  redis-commander:
-    image: rediscommander/redis-commander:latest
-    environment:
-      - REDIS_HOSTS=local:redis:6379
-    ports:
-      - "8081:8081"
-    depends_on:
-      - redis
-    networks:
-      - multi-tenant-network
-
-  # Monitoring Stack
-  prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./deployment/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.console.libraries=/etc/prometheus/console_libraries'
-      - '--web.console.templates=/etc/prometheus/consoles'
-      - '--web.enable-lifecycle'
-    networks:
-      - multi-tenant-network
-    restart: unless-stopped
-
-  grafana:
-    image: grafana/grafana:latest
-    ports:
-      - "3001:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin123
-      - GF_INSTALL_PLUGINS=grafana-piechart-panel
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./deployment/monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
-      - ./deployment/monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
-    depends_on:
-      - prometheus
-    networks:
-      - multi-tenant-network
-    restart: unless-stopped
-
-  # Message Queue (for async processing)
-  rabbitmq:
-    image: rabbitmq:3-management-alpine
-    environment:
-      RABBITMQ_DEFAULT_USER: admin
-      RABBITMQ_DEFAULT_PASS: admin123
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    networks:
-      - multi-tenant-network
-    healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-
-  # LocalStack for AWS services emulation
-  localstack:
-    image: localstack/localstack:latest
-    environment:
-      - SERVICES=s3,secretsmanager,glue,iam
-      - DEFAULT_REGION=us-east-1
-      - DEBUG=1
-      - DATA_DIR=/tmp/localstack/data
-      - DOCKER_HOST=unix:///var/run/docker.sock
-    ports:
-      - "4566:4566"
-    volumes:
-      - localstack_data:/tmp/localstack
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh
-    networks:
-      - multi-tenant-network
-
-  # Jupyter Notebook for data exploration
-  jupyter:
-    image: jupyter/pyspark-notebook:latest
-    environment:
-      - JUPYTER_ENABLE_LAB=yes
-      - JUPYTER_TOKEN=admin123
-    ports:
-      - "8888:8888"
-    volumes:
-      - jupyter_data:/home/jovyan/work
-      - ./examples/notebooks:/home/jovyan/work/examples
-    networks:
-      - multi-tenant-network
-
-  # MinIO for S3-compatible storage
+  # MinIO (S3-compatible storage for local development)
   minio:
     image: minio/minio:latest
+    container_name: multi-tenant-minio
     environment:
       MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin123
+      MINIO_ROOT_PASSWORD: minioadmin
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
       - minio_data:/data
-    command: server /data --console-address ":9001"
     networks:
       - multi-tenant-network
+    command: server /data --console-address ":9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
       timeout: 20s
       retries: 3
 
-  # Elasticsearch for logging and search
+  # Create MinIO buckets
+  minio-setup:
+    image: minio/mc:latest
+    container_name: minio-setup
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - multi-tenant-network
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set minio http://minio:9000 minioadmin minioadmin;
+      /usr/bin/mc mb minio/iceberg-finance --ignore-existing;
+      /usr/bin/mc mb minio/iceberg-retail --ignore-existing;
+      /usr/bin/mc mb minio/iceberg-healthcare --ignore-existing;
+      /usr/bin/mc policy set public minio/iceberg-finance;
+      /usr/bin/mc policy set public minio/iceberg-retail;
+      /usr/bin/mc policy set public minio/iceberg-healthcare;
+      exit 0;
+      "
+
+  # Prometheus (Metrics collection)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: multi-tenant-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - multi-tenant-network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+
+  # Grafana (Metrics visualization)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: multi-tenant-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - multi-tenant-network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # Jaeger (Distributed tracing)
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: multi-tenant-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "14268:14268"
+      - "16686:16686"
+    networks:
+      - multi-tenant-network
+    restart: unless-stopped
+
+  # ElasticSearch (Logging)
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
+    container_name: multi-tenant-elasticsearch
     environment:
       - discovery.type=single-node
       - xpack.security.enabled=false
@@ -326,77 +293,65 @@ services:
       - elasticsearch_data:/usr/share/elasticsearch/data
     networks:
       - multi-tenant-network
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
+    restart: unless-stopped
 
-  # Kibana for log visualization
+  # Kibana (Log visualization)
   kibana:
-    image: docker.elastic.co/kibana/kibana:8.11.0
+    image: docker.elastic.co/kibana/kibana:8.8.0
+    container_name: multi-tenant-kibana
     environment:
-      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
     ports:
       - "5601:5601"
     depends_on:
-      elasticsearch:
-        condition: service_healthy
+      - elasticsearch
     networks:
       - multi-tenant-network
+    restart: unless-stopped
 
-  # Apache Airflow for workflow orchestration
-  airflow-webserver:
-    image: apache/airflow:2.7.0
-    environment:
-      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://dbadmin:password123@postgres:5432/airflow_db
-      - AIRFLOW__CORE__FERNET_KEY=your-fernet-key-here
-      - AIRFLOW__WEBSERVER__SECRET_KEY=your-secret-key-here
-      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+  # Logstash (Log processing)
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.8.0
+    container_name: multi-tenant-logstash
+    volumes:
+      - ./monitoring/logstash/pipeline:/usr/share/logstash/pipeline
+      - ./monitoring/logstash/config:/usr/share/logstash/config
     ports:
-      - "8080:8080"
-    volumes:
-      - ./examples/airflow/dags:/opt/airflow/dags
-      - ./examples/airflow/logs:/opt/airflow/logs
-      - ./examples/airflow/plugins:/opt/airflow/plugins
+      - "5044:5044"
+      - "9600:9600"
     depends_on:
-      postgres:
-        condition: service_healthy
+      - elasticsearch
     networks:
       - multi-tenant-network
-    command: >
-      bash -c "airflow db init &&
-               airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin123 &&
-               airflow webserver"
+    restart: unless-stopped
 
-  airflow-scheduler:
-    image: apache/airflow:2.7.0
-    environment:
-      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
-      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://dbadmin:password123@postgres:5432/airflow_db
-      - AIRFLOW__CORE__FERNET_KEY=your-fernet-key-here
+  # Development Tools Container
+  dev-tools:
+    image: python:3.11-slim
+    container_name: dev-tools
     volumes:
-      - ./examples/airflow/dags:/opt/airflow/dags
-      - ./examples/airflow/logs:/opt/airflow/logs
-      - ./examples/airflow/plugins:/opt/airflow/plugins
-    depends_on:
-      - airflow-webserver
+      - .:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /workspace
     networks:
       - multi-tenant-network
-    command: airflow scheduler
+    command: tail -f /dev/null
+    profiles:
+      - tools
 
 volumes:
   postgres_data:
+    driver: local
   redis_data:
-  pgadmin_data:
-  prometheus_data:
-  grafana_data:
-  rabbitmq_data:
-  localstack_data:
-  jupyter_data:
+    driver: local
   minio_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
   elasticsearch_data:
+    driver: local
 
 networks:
   multi-tenant-network:

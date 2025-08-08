@@ -1,85 +1,632 @@
-# services/connector-service/app/main.py
-from fastapi import FastAPI, HTTPException, Depends, Header
-from fastapi.middleware.cors import CORSMiddleware
-import asyncio
+"""
+Multi-Tenant Connector Service
+Manages data source connectors and connection templates
+"""
+import logging
 import os
 import json
+from contextlib import asynccontextmanager
+from typing import Dict, List, Optional, Any
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Union
-from pydantic import BaseModel, validator
-import httpx
+from abc import ABC, abstractmethod
+
 import uvicorn
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Boolean
+from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
+from sqlalchemy import create_engine, Column, String, DateTime, Text, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
+import requests
 import boto3
-import pymongo
+import pymysql
 import psycopg2
-from sqlalchemy import create_engine as sql_create_engine
-import redis
+import pyodbc
+from azure.storage.blob import BlobServiceClient
+from google.cloud import storage as gcs
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Database setup
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/connector_db")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/multi_tenant_ingestion")
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+# Security
+security = HTTPBearer()
+
+
 # Models
 class Connector(Base):
     __tablename__ = "connectors"
-    
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, nullable=False, index=True)
-    name = Column(String, nullable=False)
-    description = Column(Text)
-    connector_type = Column(String, nullable=False)  # postgres, mysql, mongodb, s3, etc.
-    connection_config = Column(Text)  # Encrypted JSON
-    schema_info = Column(Text)  # JSON
-    status = Column(String, default="inactive")
-    created_at = Column(DateTime, default=datetime.utcnow)
+
+    id = Column(String, primary_key=True, index=True)
+    name = Column(String, index=True)
+    connector_type = Column(String, index=True)  # database, file, api, stream
+    organization_id = Column(String, index=True)
+    configuration = Column(Text)  # Encrypted JSON string
+    credentials = Column(Text)  # Encrypted credentials
+    properties = Column(Text)  # JSON string
+    is_active = Column(Boolean, default=True)
     last_tested = Column(DateTime)
-    created_by = Column(String)
+    test_status = Column(String)  # success, failed, pending
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 
 class ConnectorTemplate(Base):
     __tablename__ = "connector_templates"
-    
-    id = Column(String, primary_key=True)
-    name = Column(String, nullable=False)
-    connector_type = Column(String, nullable=False)
+
+    id = Column(String, primary_key=True, index=True)
+    name = Column(String, index=True)
+    connector_type = Column(String, index=True)
+    category = Column(String)  # databases, cloud_storage, saas, streaming
     description = Column(Text)
-    config_schema = Column(Text)  # JSON schema for configuration
-    default_config = Column(Text)  # JSON
+    configuration_schema = Column(Text)  # JSON schema
+    credential_schema = Column(Text)  # JSON schema
+    properties = Column(Text)  # JSON string
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
 
 # Pydantic models
 class ConnectorCreate(BaseModel):
     name: str
-    description: Optional[str] = None
     connector_type: str
-    connection_config: Dict[str, Any]
+    configuration: Dict
+    credentials: Dict
+    properties: Optional[Dict] = {}
+
 
 class ConnectorUpdate(BaseModel):
     name: Optional[str] = None
-    description: Optional[str] = None
-    connection_config: Optional[Dict[str, Any]] = None
-    status: Optional[str] = None
+    configuration: Optional[Dict] = None
+    credentials: Optional[Dict] = None
+    properties: Optional[Dict] = None
+    is_active: Optional[bool] = None
 
-class ConnectorTest(BaseModel):
-    connection_config: Dict[str, Any]
+
+class ConnectorResponse(BaseModel):
+    id: str
+    name: str
     connector_type: str
+    organization_id: str
+    configuration: Dict
+    properties: Dict
+    is_active: bool
+    last_tested: Optional[datetime]
+    test_status: Optional[str]
+    created_at: datetime
+    updated_at: datetime
 
-class DataPreview(BaseModel):
-    connector_id: str
-    table_name: Optional[str] = None
-    query: Optional[str] = None
-    limit: Optional[int] = 100
+
+class ConnectorTemplateResponse(BaseModel):
+    id: str
+    name: str
+    connector_type: str
+    category: str
+    description: str
+    configuration_schema: Dict
+    credential_schema: Dict
+    properties: Dict
+    is_active: bool
+    created_at: datetime
+
+
+class ConnectionTestRequest(BaseModel):
+    connector_id: Optional[str] = None
+    configuration: Optional[Dict] = None
+    credentials: Optional[Dict] = None
+
+
+class ConnectionTestResponse(BaseModel):
+    success: bool
+    message: str
+    details: Optional[Dict] = None
+
+
+# Database dependency
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# Authentication dependency
+async def get_current_organization(
+        authorization: HTTPAuthorizationCredentials = Depends(security),
+        x_organization_id: Optional[str] = Header(None)
+) -> str:
+    if not x_organization_id:
+        raise HTTPException(status_code=401, detail="Organization ID required")
+    return x_organization_id
+
+
+# Connector interface
+class BaseConnector(ABC):
+    """Base class for all connectors"""
+
+    def __init__(self, config: Dict, credentials: Dict):
+        self.config = config
+        self.credentials = credentials
+
+    @abstractmethod
+    async def test_connection(self) -> bool:
+        """Test if the connection is valid"""
+        pass
+
+    @abstractmethod
+    async def get_schema(self) -> Dict:
+        """Get the schema/structure of the data source"""
+        pass
+
+    @abstractmethod
+    async def get_sample_data(self, limit: int = 10) -> List[Dict]:
+        """Get sample data from the source"""
+        pass
+
+
+class DatabaseConnector(BaseConnector):
+    """Database connector for SQL databases"""
+
+    async def test_connection(self) -> bool:
+        try:
+            db_type = self.config.get("database_type", "postgresql")
+
+            if db_type == "postgresql":
+                conn = psycopg2.connect(
+                    host=self.config["host"],
+                    port=self.config.get("port", 5432),
+                    database=self.config["database"],
+                    user=self.credentials["username"],
+                    password=self.credentials["password"]
+                )
+            elif db_type == "mysql":
+                conn = pymysql.connect(
+                    host=self.config["host"],
+                    port=self.config.get("port", 3306),
+                    database=self.config["database"],
+                    user=self.credentials["username"],
+                    password=self.credentials["password"]
+                )
+            elif db_type == "sqlserver":
+                conn_str = f"DRIVER={{SQL Server}};SERVER={self.config['host']};DATABASE={self.config['database']};UID={self.credentials['username']};PWD={self.credentials['password']}"
+                conn = pyodbc.connect(conn_str)
+            else:
+                return False
+
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.close()
+            conn.close()
+            return True
+
+        except Exception as e:
+            logger.error(f"Database connection test failed: {str(e)}")
+            return False
+
+    async def get_schema(self) -> Dict:
+        """Get database schema information"""
+        try:
+            db_type = self.config.get("database_type", "postgresql")
+
+            if db_type == "postgresql":
+                conn = psycopg2.connect(
+                    host=self.config["host"],
+                    port=self.config.get("port", 5432),
+                    database=self.config["database"],
+                    user=self.credentials["username"],
+                    password=self.credentials["password"]
+                )
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT table_name, column_name, data_type, is_nullable
+                    FROM information_schema.columns 
+                    WHERE table_schema = 'public'
+                    ORDER BY table_name, ordinal_position
+                """)
+
+                schema = {}
+                for row in cursor.fetchall():
+                    table_name, column_name, data_type, is_nullable = row
+                    if table_name not in schema:
+                        schema[table_name] = []
+                    schema[table_name].append({
+                        "name": column_name,
+                        "type": data_type,
+                        "nullable": is_nullable == "YES"
+                    })
+
+                cursor.close()
+                conn.close()
+                return schema
+
+        except Exception as e:
+            logger.error(f"Failed to get schema: {str(e)}")
+            return {}
+
+    async def get_sample_data(self, limit: int = 10) -> List[Dict]:
+        """Get sample data from database tables"""
+        try:
+            schema = await self.get_schema()
+            sample_data = {}
+
+            db_type = self.config.get("database_type", "postgresql")
+
+            if db_type == "postgresql":
+                conn = psycopg2.connect(
+                    host=self.config["host"],
+                    port=self.config.get("port", 5432),
+                    database=self.config["database"],
+                    user=self.credentials["username"],
+                    password=self.credentials["password"]
+                )
+
+                for table_name in list(schema.keys())[:5]:  # Limit to 5 tables
+                    cursor = conn.cursor()
+                    cursor.execute(f"SELECT * FROM {table_name} LIMIT {limit}")
+
+                    columns = [desc[0] for desc in cursor.description]
+                    rows = cursor.fetchall()
+
+                    sample_data[table_name] = [
+                        dict(zip(columns, row)) for row in rows
+                    ]
+                    cursor.close()
+
+                conn.close()
+                return sample_data
+
+        except Exception as e:
+            logger.error(f"Failed to get sample data: {str(e)}")
+            return {}
+
+
+class S3Connector(BaseConnector):
+    """Amazon S3 connector"""
+
+    async def test_connection(self) -> bool:
+        try:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=self.credentials["access_key_id"],
+                aws_secret_access_key=self.credentials["secret_access_key"],
+                region_name=self.config.get("region", "us-east-1")
+            )
+
+            bucket_name = self.config["bucket_name"]
+            prefix = self.config.get("prefix", "")
+
+            response = s3_client.list_objects_v2(
+                Bucket=bucket_name,
+                Prefix=prefix,
+                MaxKeys=1000
+            )
+
+            files = {}
+            for obj in response.get("Contents", []):
+                key = obj["Key"]
+                file_extension = key.split(".")[-1].lower() if "." in key else "unknown"
+
+                if file_extension not in files:
+                    files[file_extension] = []
+
+                files[file_extension].append({
+                    "key": key,
+                    "size": obj["Size"],
+                    "last_modified": obj["LastModified"].isoformat()
+                })
+
+            return {
+                "bucket": bucket_name,
+                "file_types": files,
+                "total_objects": len(response.get("Contents", []))
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to get S3 schema: {str(e)}")
+            return {}
+
+    async def get_sample_data(self, limit: int = 10) -> List[Dict]:
+        """Get sample files from S3"""
+        try:
+            s3_client = boto3.client(
+                's3',
+                aws_access_key_id=self.credentials["access_key_id"],
+                aws_secret_access_key=self.credentials["secret_access_key"],
+                region_name=self.config.get("region", "us-east-1")
+            )
+
+            bucket_name = self.config["bucket_name"]
+            prefix = self.config.get("prefix", "")
+
+            response = s3_client.list_objects_v2(
+                Bucket=bucket_name,
+                Prefix=prefix,
+                MaxKeys=limit
+            )
+
+            sample_files = []
+            for obj in response.get("Contents", []):
+                sample_files.append({
+                    "key": obj["Key"],
+                    "size": obj["Size"],
+                    "last_modified": obj["LastModified"].isoformat(),
+                    "etag": obj["ETag"].strip('"')
+                })
+
+            return sample_files
+
+        except Exception as e:
+            logger.error(f"Failed to get S3 sample data: {str(e)}")
+            return []
+
+
+class APIConnector(BaseConnector):
+    """REST API connector"""
+
+    async def test_connection(self) -> bool:
+        try:
+            url = self.config["base_url"]
+            headers = self.config.get("headers", {})
+
+            # Add authentication
+            auth_type = self.credentials.get("auth_type", "none")
+            if auth_type == "bearer":
+                headers["Authorization"] = f"Bearer {self.credentials['token']}"
+            elif auth_type == "api_key":
+                headers[self.credentials["key_header"]] = self.credentials["api_key"]
+
+            response = requests.get(
+                f"{url.rstrip('/')}/health",
+                headers=headers,
+                timeout=30
+            )
+
+            return response.status_code < 400
+
+        except Exception as e:
+            logger.error(f"API connection test failed: {str(e)}")
+            return False
+
+    async def get_schema(self) -> Dict:
+        """Get API endpoints and schema"""
+        try:
+            url = self.config["base_url"]
+            headers = self.config.get("headers", {})
+
+            # Add authentication
+            auth_type = self.credentials.get("auth_type", "none")
+            if auth_type == "bearer":
+                headers["Authorization"] = f"Bearer {self.credentials['token']}"
+            elif auth_type == "api_key":
+                headers[self.credentials["key_header"]] = self.credentials["api_key"]
+
+            # Try to get OpenAPI/Swagger schema
+            schema_urls = ["/swagger.json", "/openapi.json", "/api-docs"]
+
+            for schema_url in schema_urls:
+                try:
+                    response = requests.get(
+                        f"{url.rstrip('/')}{schema_url}",
+                        headers=headers,
+                        timeout=30
+                    )
+                    if response.status_code == 200:
+                        return response.json()
+                except:
+                    continue
+
+            # Fallback: return basic info
+            return {
+                "base_url": url,
+                "endpoints": self.config.get("endpoints", []),
+                "schema_available": False
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to get API schema: {str(e)}")
+            return {}
+
+    async def get_sample_data(self, limit: int = 10) -> List[Dict]:
+        """Get sample data from API endpoints"""
+        try:
+            url = self.config["base_url"]
+            headers = self.config.get("headers", {})
+            endpoints = self.config.get("endpoints", [])
+
+            # Add authentication
+            auth_type = self.credentials.get("auth_type", "none")
+            if auth_type == "bearer":
+                headers["Authorization"] = f"Bearer {self.credentials['token']}"
+            elif auth_type == "api_key":
+                headers[self.credentials["key_header"]] = self.credentials["api_key"]
+
+            sample_data = {}
+
+            for endpoint in endpoints[:3]:  # Limit to 3 endpoints
+                try:
+                    response = requests.get(
+                        f"{url.rstrip('/')}/{endpoint.lstrip('/')}",
+                        headers=headers,
+                        params={"limit": limit},
+                        timeout=30
+                    )
+
+                    if response.status_code == 200:
+                        sample_data[endpoint] = response.json()
+
+                except Exception as e:
+                    logger.error(f"Failed to get sample data from {endpoint}: {str(e)}")
+                    sample_data[endpoint] = {"error": str(e)}
+
+            return sample_data
+
+        except Exception as e:
+            logger.error(f"Failed to get API sample data: {str(e)}")
+            return []
+
+
+class ConnectorFactory:
+    """Factory for creating connector instances"""
+
+    @staticmethod
+    def create_connector(connector_type: str, config: Dict, credentials: Dict) -> BaseConnector:
+        if connector_type in ["postgresql", "mysql", "sqlserver"]:
+            return DatabaseConnector(config, credentials)
+        elif connector_type == "s3":
+            return S3Connector(config, credentials)
+        elif connector_type == "api":
+            return APIConnector(config, credentials)
+        else:
+            raise ValueError(f"Unsupported connector type: {connector_type}")
+
+
+class EncryptionManager:
+    """Manages encryption of sensitive data"""
+
+    def __init__(self):
+        self.key = os.getenv("ENCRYPTION_KEY", "default-key").encode()
+
+    def encrypt(self, data: str) -> str:
+        """Encrypt sensitive data"""
+        # In production, use proper encryption like Fernet
+        import base64
+        return base64.b64encode(data.encode()).decode()
+
+    def decrypt(self, encrypted_data: str) -> str:
+        """Decrypt sensitive data"""
+        # In production, use proper decryption like Fernet
+        import base64
+        return base64.b64decode(encrypted_data.encode()).decode()
+
+
+encryption_manager = EncryptionManager()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    Base.metadata.create_all(bind=engine)
+    await create_default_templates()
+    logger.info("Connector Service started")
+    yield
+    # Shutdown
+    logger.info("Connector Service shutting down")
+
+
+async def create_default_templates():
+    """Create default connector templates"""
+    db = SessionLocal()
+
+    templates = [
+        {
+            "id": "postgresql-template",
+            "name": "PostgreSQL Database",
+            "connector_type": "postgresql",
+            "category": "databases",
+            "description": "Connect to PostgreSQL database",
+            "configuration_schema": {
+                "type": "object",
+                "properties": {
+                    "host": {"type": "string", "title": "Host"},
+                    "port": {"type": "integer", "default": 5432, "title": "Port"},
+                    "database": {"type": "string", "title": "Database Name"},
+                    "ssl_mode": {"type": "string", "enum": ["disable", "require"], "default": "require"}
+                },
+                "required": ["host", "database"]
+            },
+            "credential_schema": {
+                "type": "object",
+                "properties": {
+                    "username": {"type": "string", "title": "Username"},
+                    "password": {"type": "string", "format": "password", "title": "Password"}
+                },
+                "required": ["username", "password"]
+            }
+        },
+        {
+            "id": "s3-template",
+            "name": "Amazon S3",
+            "connector_type": "s3",
+            "category": "cloud_storage",
+            "description": "Connect to Amazon S3 bucket",
+            "configuration_schema": {
+                "type": "object",
+                "properties": {
+                    "bucket_name": {"type": "string", "title": "Bucket Name"},
+                    "region": {"type": "string", "default": "us-east-1", "title": "AWS Region"},
+                    "prefix": {"type": "string", "title": "Prefix (optional)"}
+                },
+                "required": ["bucket_name"]
+            },
+            "credential_schema": {
+                "type": "object",
+                "properties": {
+                    "access_key_id": {"type": "string", "title": "Access Key ID"},
+                    "secret_access_key": {"type": "string", "format": "password", "title": "Secret Access Key"}
+                },
+                "required": ["access_key_id", "secret_access_key"]
+            }
+        },
+        {
+            "id": "api-template",
+            "name": "REST API",
+            "connector_type": "api",
+            "category": "saas",
+            "description": "Connect to REST API endpoint",
+            "configuration_schema": {
+                "type": "object",
+                "properties": {
+                    "base_url": {"type": "string", "format": "uri", "title": "Base URL"},
+                    "endpoints": {"type": "array", "items": {"type": "string"}, "title": "Endpoints"},
+                    "headers": {"type": "object", "title": "Additional Headers"}
+                },
+                "required": ["base_url"]
+            },
+            "credential_schema": {
+                "type": "object",
+                "properties": {
+                    "auth_type": {"type": "string", "enum": ["none", "bearer", "api_key"], "default": "none"},
+                    "token": {"type": "string", "title": "Bearer Token"},
+                    "api_key": {"type": "string", "title": "API Key"},
+                    "key_header": {"type": "string", "title": "API Key Header Name"}
+                }
+            }
+        }
+    ]
+
+    for template_data in templates:
+        existing = db.query(ConnectorTemplate).filter(ConnectorTemplate.id == template_data["id"]).first()
+        if not existing:
+            template = ConnectorTemplate(
+                id=template_data["id"],
+                name=template_data["name"],
+                connector_type=template_data["connector_type"],
+                category=template_data["category"],
+                description=template_data["description"],
+                configuration_schema=json.dumps(template_data["configuration_schema"]),
+                credential_schema=json.dumps(template_data["credential_schema"]),
+                properties=json.dumps({})
+            )
+            db.add(template)
+
+    db.commit()
+    db.close()
+
 
 # FastAPI app
 app = FastAPI(
     title="Multi-Tenant Connector Service",
-    description="Data source connector and integration service",
-    version="1.0.0"
+    description="Data source connector management service",
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 app.add_middleware(
@@ -90,851 +637,348 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database dependency
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
-# Tenant extraction
-async def get_tenant_id(x_tenant_id: str = Header(alias="X-Tenant-ID")):
-    if not x_tenant_id:
-        raise HTTPException(status_code=400, detail="X-Tenant-ID header required")
-    return x_tenant_id
-
-# Encryption utilities
-def encrypt_config(config: Dict[str, Any]) -> str:
-    """Encrypt sensitive configuration data"""
-    # In production, use proper encryption like AWS KMS
-    import base64
-    config_str = json.dumps(config)
-    encoded = base64.b64encode(config_str.encode()).decode()
-    return encoded
-
-def decrypt_config(encrypted_config: str) -> Dict[str, Any]:
-    """Decrypt configuration data"""
-    import base64
-    decoded = base64.b64decode(encrypted_config.encode()).decode()
-    return json.loads(decoded)
-
-# Connector implementations
-class BaseConnector:
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-    
-    async def test_connection(self) -> Dict[str, Any]:
-        raise NotImplementedError
-    
-    async def get_schema(self) -> Dict[str, Any]:
-        raise NotImplementedError
-    
-    async def preview_data(self, table_name: str = None, query: str = None, limit: int = 100) -> Dict[str, Any]:
-        raise NotImplementedError
-
-class PostgreSQLConnector(BaseConnector):
-    async def test_connection(self) -> Dict[str, Any]:
-        try:
-            conn_str = f"postgresql://{self.config['username']}:{self.config['password']}@{self.config['host']}:{self.config['port']}/{self.config['database']}"
-            engine = sql_create_engine(conn_str)
-            with engine.connect() as conn:
-                result = conn.execute("SELECT 1")
-                return {"status": "error", "message": str(e)}
-    
-    async def get_schema(self) -> Dict[str, Any]:
-        try:
-            connection_string = f"mongodb://{self.config['username']}:{self.config['password']}@{self.config['host']}:{self.config['port']}/{self.config['database']}"
-            client = pymongo.MongoClient(connection_string)
-            db = client[self.config['database']]
-            
-            collections = {}
-            for collection_name in db.list_collection_names():
-                collection = db[collection_name]
-                # Sample a few documents to infer schema
-                sample_docs = list(collection.find().limit(10))
-                
-                if sample_docs:
-                    # Extract field types from sample documents
-                    fields = {}
-                    for doc in sample_docs:
-                        for key, value in doc.items():
-                            if key not in fields:
-                                fields[key] = type(value).__name__
-                    
-                    collections[collection_name] = [
-                        {"name": field, "type": field_type, "nullable": True}
-                        for field, field_type in fields.items()
-                    ]
-                else:
-                    collections[collection_name] = []
-            
-            client.close()
-            return {"status": "success", "collections": collections}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-    
-    async def preview_data(self, table_name: str = None, query: str = None, limit: int = 100) -> Dict[str, Any]:
-        try:
-            connection_string = f"mongodb://{self.config['username']}:{self.config['password']}@{self.config['host']}:{self.config['port']}/{self.config['database']}"
-            client = pymongo.MongoClient(connection_string)
-            db = client[self.config['database']]
-            
-            if table_name:
-                collection = db[table_name]
-                if query:
-                    # Parse MongoDB query (simplified)
-                    import ast
-                    mongo_query = ast.literal_eval(query) if query.startswith('{') else {}
-                else:
-                    mongo_query = {}
-                
-                docs = list(collection.find(mongo_query).limit(limit))
-                
-                # Convert ObjectId to string for JSON serialization
-                for doc in docs:
-                    if '_id' in doc:
-                        doc['_id'] = str(doc['_id'])
-                
-                columns = list(docs[0].keys()) if docs else []
-                
-                client.close()
-                return {
-                    "status": "success",
-                    "columns": columns,
-                    "data": docs,
-                    "row_count": len(docs)
-                }
-            else:
-                raise ValueError("table_name (collection name) must be provided for MongoDB")
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-
-class S3Connector(BaseConnector):
-    async def test_connection(self) -> Dict[str, Any]:
-        try:
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=self.config['access_key'],
-                aws_secret_access_key=self.config['secret_key'],
-                region_name=self.config.get('region', 'us-east-1')
-            )
-            
-            # Test by listing buckets
-            s3_client.list_buckets()
-            return {"status": "success", "message": "Connection successful"}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-    
-    async def get_schema(self) -> Dict[str, Any]:
-        try:
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=self.config['access_key'],
-                aws_secret_access_key=self.config['secret_key'],
-                region_name=self.config.get('region', 'us-east-1')
-            )
-            
-            bucket_name = self.config['bucket']
-            prefix = self.config.get('prefix', '')
-            
-            # List objects in bucket
-            response = s3_client.list_objects_v2(
-                Bucket=bucket_name,
-                Prefix=prefix,
-                MaxKeys=100
-            )
-            
-            files = []
-            if 'Contents' in response:
-                for obj in response['Contents']:
-                    files.append({
-                        "key": obj['Key'],
-                        "size": obj['Size'],
-                        "last_modified": obj['LastModified'].isoformat(),
-                        "storage_class": obj.get('StorageClass', 'STANDARD')
-                    })
-            
-            return {"status": "success", "files": files}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-    
-    async def preview_data(self, table_name: str = None, query: str = None, limit: int = 100) -> Dict[str, Any]:
-        try:
-            s3_client = boto3.client(
-                's3',
-                aws_access_key_id=self.config['access_key'],
-                aws_secret_access_key=self.config['secret_key'],
-                region_name=self.config.get('region', 'us-east-1')
-            )
-            
-            bucket_name = self.config['bucket']
-            file_key = table_name or query  # Use table_name as file key
-            
-            if not file_key:
-                raise ValueError("file key must be provided")
-            
-            # Get object
-            response = s3_client.get_object(Bucket=bucket_name, Key=file_key)
-            content = response['Body'].read()
-            
-            # Try to parse as CSV/JSON
-            if file_key.endswith('.json'):
-                import json
-                data = json.loads(content.decode())
-                if isinstance(data, list):
-                    preview_data = data[:limit]
-                    columns = list(preview_data[0].keys()) if preview_data else []
-                else:
-                    preview_data = [data]
-                    columns = list(data.keys())
-            elif file_key.endswith('.csv'):
-                import csv
-                import io
-                csv_data = csv.DictReader(io.StringIO(content.decode()))
-                preview_data = list(csv_data)[:limit]
-                columns = list(preview_data[0].keys()) if preview_data else []
-            else:
-                # Return raw content preview
-                preview_data = [{"content": content.decode()[:1000]}]
-                columns = ["content"]
-            
-            return {
-                "status": "success",
-                "columns": columns,
-                "data": preview_data,
-                "row_count": len(preview_data)
-            }
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-
-class APIConnector(BaseConnector):
-    async def test_connection(self) -> Dict[str, Any]:
-        try:
-            headers = self.config.get('headers', {})
-            auth = None
-            
-            if 'api_key' in self.config:
-                headers['Authorization'] = f"Bearer {self.config['api_key']}"
-            elif 'username' in self.config and 'password' in self.config:
-                auth = (self.config['username'], self.config['password'])
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    self.config['base_url'],
-                    headers=headers,
-                    auth=auth,
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    return {"status": "success", "message": "Connection successful"}
-                else:
-                    return {"status": "error", "message": f"HTTP {response.status_code}"}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-    
-    async def get_schema(self) -> Dict[str, Any]:
-        try:
-            # For API connectors, schema discovery is endpoint-specific
-            endpoints = self.config.get('endpoints', [])
-            
-            return {
-                "status": "success",
-                "endpoints": endpoints,
-                "note": "API schema depends on specific endpoints"
-            }
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-    
-    async def preview_data(self, table_name: str = None, query: str = None, limit: int = 100) -> Dict[str, Any]:
-        try:
-            endpoint = table_name or query
-            if not endpoint:
-                raise ValueError("endpoint must be provided")
-            
-            url = f"{self.config['base_url'].rstrip('/')}/{endpoint.lstrip('/')}"
-            headers = self.config.get('headers', {})
-            auth = None
-            
-            if 'api_key' in self.config:
-                headers['Authorization'] = f"Bearer {self.config['api_key']}"
-            elif 'username' in self.config and 'password' in self.config:
-                auth = (self.config['username'], self.config['password'])
-            
-            # Add limit parameter if supported
-            params = {}
-            if limit and self.config.get('supports_limit', True):
-                limit_param = self.config.get('limit_param', 'limit')
-                params[limit_param] = limit
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    url,
-                    headers=headers,
-                    auth=auth,
-                    params=params,
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    # Handle different response formats
-                    if isinstance(data, list):
-                        preview_data = data[:limit]
-                        columns = list(preview_data[0].keys()) if preview_data else []
-                    elif isinstance(data, dict):
-                        # Look for common data keys
-                        data_key = None
-                        for key in ['data', 'results', 'items', 'records']:
-                            if key in data and isinstance(data[key], list):
-                                data_key = key
-                                break
-                        
-                        if data_key:
-                            preview_data = data[data_key][:limit]
-                            columns = list(preview_data[0].keys()) if preview_data else []
-                        else:
-                            preview_data = [data]
-                            columns = list(data.keys())
-                    else:
-                        preview_data = [{"response": str(data)}]
-                        columns = ["response"]
-                    
-                    return {
-                        "status": "success",
-                        "columns": columns,
-                        "data": preview_data,
-                        "row_count": len(preview_data)
-                    }
-                else:
-                    return {"status": "error", "message": f"HTTP {response.status_code}: {response.text}"}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-
-# Connector factory
-def create_connector(connector_type: str, config: Dict[str, Any]) -> BaseConnector:
-    connectors = {
-        'postgresql': PostgreSQLConnector,
-        'mysql': MySQLConnector,
-        'mongodb': MongoDBConnector,
-        's3': S3Connector,
-        'api': APIConnector
-    }
-    
-    if connector_type not in connectors:
-        raise ValueError(f"Unsupported connector type: {connector_type}")
-    
-    return connectors[connector_type](config)
-
-# API Routes
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "connector-service", "timestamp": datetime.utcnow()}
+    return {"status": "healthy", "service": "connector-service"}
 
-@app.get("/api/v1/connector-types")
-async def list_connector_types():
-    """List available connector types"""
-    connector_types = [
-        {
-            "type": "postgresql",
-            "name": "PostgreSQL",
-            "description": "Connect to PostgreSQL databases",
-            "config_fields": [
-                {"name": "host", "type": "string", "required": True},
-                {"name": "port", "type": "integer", "default": 5432},
-                {"name": "database", "type": "string", "required": True},
-                {"name": "username", "type": "string", "required": True},
-                {"name": "password", "type": "password", "required": True}
-            ]
-        },
-        {
-            "type": "mysql",
-            "name": "MySQL",
-            "description": "Connect to MySQL databases",
-            "config_fields": [
-                {"name": "host", "type": "string", "required": True},
-                {"name": "port", "type": "integer", "default": 3306},
-                {"name": "database", "type": "string", "required": True},
-                {"name": "username", "type": "string", "required": True},
-                {"name": "password", "type": "password", "required": True}
-            ]
-        },
-        {
-            "type": "mongodb",
-            "name": "MongoDB",
-            "description": "Connect to MongoDB databases",
-            "config_fields": [
-                {"name": "host", "type": "string", "required": True},
-                {"name": "port", "type": "integer", "default": 27017},
-                {"name": "database", "type": "string", "required": True},
-                {"name": "username", "type": "string", "required": True},
-                {"name": "password", "type": "password", "required": True}
-            ]
-        },
-        {
-            "type": "s3",
-            "name": "Amazon S3",
-            "description": "Connect to Amazon S3 buckets",
-            "config_fields": [
-                {"name": "access_key", "type": "string", "required": True},
-                {"name": "secret_key", "type": "password", "required": True},
-                {"name": "region", "type": "string", "default": "us-east-1"},
-                {"name": "bucket", "type": "string", "required": True},
-                {"name": "prefix", "type": "string", "required": False}
-            ]
-        },
-        {
-            "type": "api",
-            "name": "REST API",
-            "description": "Connect to REST APIs",
-            "config_fields": [
-                {"name": "base_url", "type": "string", "required": True},
-                {"name": "api_key", "type": "password", "required": False},
-                {"name": "username", "type": "string", "required": False},
-                {"name": "password", "type": "password", "required": False},
-                {"name": "headers", "type": "object", "required": False}
-            ]
-        }
+
+@app.get("/api/v1/connector-templates", response_model=List[ConnectorTemplateResponse])
+async def list_connector_templates(db: Session = Depends(get_db)):
+    """List all available connector templates"""
+    templates = db.query(ConnectorTemplate).filter(ConnectorTemplate.is_active == True).all()
+
+    return [
+        ConnectorTemplateResponse(
+            id=t.id,
+            name=t.name,
+            connector_type=t.connector_type,
+            category=t.category,
+            description=t.description,
+            configuration_schema=json.loads(t.configuration_schema),
+            credential_schema=json.loads(t.credential_schema),
+            properties=json.loads(t.properties),
+            is_active=t.is_active,
+            created_at=t.created_at
+        )
+        for t in templates
     ]
-    
-    return {"connector_types": connector_types}
 
-@app.post("/api/v1/connectors/test")
-async def test_connector(
-    test_request: ConnectorTest,
-    tenant_id: str = Depends(get_tenant_id)
-):
-    """Test a connector configuration"""
-    try:
-        connector = create_connector(test_request.connector_type, test_request.connection_config)
-        result = await connector.test_connection()
-        return result
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
-@app.post("/api/v1/connectors")
-async def create_connector_endpoint(
-    connector: ConnectorCreate,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
+@app.get("/api/v1/connector-templates/{template_id}", response_model=ConnectorTemplateResponse)
+async def get_connector_template(template_id: str, db: Session = Depends(get_db)):
+    """Get a specific connector template"""
+    template = db.query(ConnectorTemplate).filter(ConnectorTemplate.id == template_id).first()
+
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    return ConnectorTemplateResponse(
+        id=template.id,
+        name=template.name,
+        connector_type=template.connector_type,
+        category=template.category,
+        description=template.description,
+        configuration_schema=json.loads(template.configuration_schema),
+        credential_schema=json.loads(template.credential_schema),
+        properties=json.loads(template.properties),
+        is_active=template.is_active,
+        created_at=template.created_at
+    )
+
+
+@app.post("/api/v1/connectors", response_model=ConnectorResponse)
+async def create_connector(
+        connector: ConnectorCreate,
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
 ):
     """Create a new connector"""
-    connector_id = f"conn_{tenant_id}_{int(datetime.utcnow().timestamp())}"
-    
-    # Test connection first
-    try:
-        conn_instance = create_connector(connector.connector_type, connector.connection_config)
-        test_result = await conn_instance.test_connection()
-        
-        if test_result["status"] != "success":
-            raise HTTPException(status_code=400, detail=f"Connection test failed: {test_result['message']}")
-        
-        # Get schema information
-        schema_info = await conn_instance.get_schema()
-        
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to create connector: {str(e)}")
-    
-    # Encrypt and store configuration
-    encrypted_config = encrypt_config(connector.connection_config)
-    
+    import uuid
+
+    connector_id = str(uuid.uuid4())
+
+    # Encrypt sensitive data
+    encrypted_config = encryption_manager.encrypt(json.dumps(connector.configuration))
+    encrypted_credentials = encryption_manager.encrypt(json.dumps(connector.credentials))
+
     db_connector = Connector(
         id=connector_id,
-        tenant_id=tenant_id,
         name=connector.name,
-        description=connector.description,
         connector_type=connector.connector_type,
-        connection_config=encrypted_config,
-        schema_info=json.dumps(schema_info),
-        status="active",
-        last_tested=datetime.utcnow()
+        organization_id=organization_id,
+        configuration=encrypted_config,
+        credentials=encrypted_credentials,
+        properties=json.dumps(connector.properties)
     )
-    
+
     db.add(db_connector)
     db.commit()
     db.refresh(db_connector)
-    
-    return {"connector_id": connector_id, "status": "created"}
 
-@app.get("/api/v1/connectors")
+    return ConnectorResponse(
+        id=db_connector.id,
+        name=db_connector.name,
+        connector_type=db_connector.connector_type,
+        organization_id=db_connector.organization_id,
+        configuration=connector.configuration,  # Return unencrypted for response
+        properties=json.loads(db_connector.properties),
+        is_active=db_connector.is_active,
+        last_tested=db_connector.last_tested,
+        test_status=db_connector.test_status,
+        created_at=db_connector.created_at,
+        updated_at=db_connector.updated_at
+    )
+
+
+@app.get("/api/v1/connectors", response_model=List[ConnectorResponse])
 async def list_connectors(
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
 ):
-    """List all connectors for a tenant"""
-    connectors = db.query(Connector).filter(Connector.tenant_id == tenant_id).all()
-    
-    result = []
-    for connector in connectors:
-        result.append({
-            "id": connector.id,
-            "name": connector.name,
-            "description": connector.description,
-            "connector_type": connector.connector_type,
-            "status": connector.status,
-            "created_at": connector.created_at,
-            "last_tested": connector.last_tested
-        })
-    
-    return {"connectors": result}
+    """List all connectors for the organization"""
+    connectors = db.query(Connector).filter(Connector.organization_id == organization_id).all()
 
-@app.get("/api/v1/connectors/{connector_id}")
-async def get_connector(
-    connector_id: str,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
+    response_list = []
+    for conn in connectors:
+        # Decrypt configuration for response (remove sensitive credentials)
+        config = json.loads(encryption_manager.decrypt(conn.configuration))
+
+        response_list.append(ConnectorResponse(
+            id=conn.id,
+            name=conn.name,
+            connector_type=conn.connector_type,
+            organization_id=conn.organization_id,
+            configuration=config,
+            properties=json.loads(conn.properties),
+            is_active=conn.is_active,
+            last_tested=conn.last_tested,
+            test_status=conn.test_status,
+            created_at=conn.created_at,
+            updated_at=conn.updated_at
+        ))
+
+    return response_list
+
+
+@app.post("/api/v1/connectors/test", response_model=ConnectionTestResponse)
+async def test_connection(
+        test_request: ConnectionTestRequest,
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
 ):
-    """Get a specific connector"""
+    """Test a connector connection"""
+    try:
+        if test_request.connector_id:
+            # Test existing connector
+            connector = db.query(Connector).filter(
+                Connector.id == test_request.connector_id,
+                Connector.organization_id == organization_id
+            ).first()
+
+            if not connector:
+                raise HTTPException(status_code=404, detail="Connector not found")
+
+            config = json.loads(encryption_manager.decrypt(connector.configuration))
+            credentials = json.loads(encryption_manager.decrypt(connector.credentials))
+            connector_type = connector.connector_type
+        else:
+            # Test new connector configuration
+            if not test_request.configuration or not test_request.credentials:
+                raise HTTPException(status_code=400,
+                                    detail="Configuration and credentials required for new connector test")
+
+            config = test_request.configuration
+            credentials = test_request.credentials
+            connector_type = config.get("connector_type")
+
+        if not connector_type:
+            raise HTTPException(status_code=400, detail="Connector type not specified")
+
+        # Create connector instance and test
+        conn_instance = ConnectorFactory.create_connector(connector_type, config, credentials)
+        success = await conn_instance.test_connection()
+
+        # Update test status if testing existing connector
+        if test_request.connector_id:
+            connector.last_tested = datetime.utcnow()
+            connector.test_status = "success" if success else "failed"
+            db.commit()
+
+        return ConnectionTestResponse(
+            success=success,
+            message="Connection successful" if success else "Connection failed",
+            details={"connector_type": connector_type}
+        )
+
+    except Exception as e:
+        logger.error(f"Connection test failed: {str(e)}")
+        return ConnectionTestResponse(
+            success=False,
+            message=f"Connection test failed: {str(e)}",
+            details={"error": str(e)}
+        )
+
+
+@app.get("/api/v1/connectors/{connector_id}/schema")
+async def get_connector_schema(
+        connector_id: str,
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
+):
+    """Get schema information from a connector"""
     connector = db.query(Connector).filter(
         Connector.id == connector_id,
-        Connector.tenant_id == tenant_id
+        Connector.organization_id == organization_id
     ).first()
-    
+
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
-    
-    # Don't return sensitive configuration data
-    return {
-        "id": connector.id,
-        "name": connector.name,
-        "description": connector.description,
-        "connector_type": connector.connector_type,
-        "status": connector.status,
-        "schema_info": json.loads(connector.schema_info or "{}"),
-        "created_at": connector.created_at,
-        "last_tested": connector.last_tested
-    }
 
-@app.put("/api/v1/connectors/{connector_id}")
+    try:
+        config = json.loads(encryption_manager.decrypt(connector.configuration))
+        credentials = json.loads(encryption_manager.decrypt(connector.credentials))
+
+        conn_instance = ConnectorFactory.create_connector(connector.connector_type, config, credentials)
+        schema = await conn_instance.get_schema()
+
+        return {"schema": schema}
+
+    except Exception as e:
+        logger.error(f"Failed to get schema: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get schema: {str(e)}")
+
+
+@app.get("/api/v1/connectors/{connector_id}/sample-data")
+async def get_connector_sample_data(
+        connector_id: str,
+        limit: int = 10,
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
+):
+    """Get sample data from a connector"""
+    connector = db.query(Connector).filter(
+        Connector.id == connector_id,
+        Connector.organization_id == organization_id
+    ).first()
+
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    try:
+        config = json.loads(encryption_manager.decrypt(connector.configuration))
+        credentials = json.loads(encryption_manager.decrypt(connector.credentials))
+
+        conn_instance = ConnectorFactory.create_connector(connector.connector_type, config, credentials)
+        sample_data = await conn_instance.get_sample_data(limit)
+
+        return {"sample_data": sample_data}
+
+    except Exception as e:
+        logger.error(f"Failed to get sample data: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get sample data: {str(e)}")
+
+
+@app.put("/api/v1/connectors/{connector_id}", response_model=ConnectorResponse)
 async def update_connector(
-    connector_id: str,
-    connector_update: ConnectorUpdate,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
+        connector_id: str,
+        connector_update: ConnectorUpdate,
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
 ):
     """Update a connector"""
     connector = db.query(Connector).filter(
         Connector.id == connector_id,
-        Connector.tenant_id == tenant_id
+        Connector.organization_id == organization_id
     ).first()
-    
+
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
-    
-    # If connection config is being updated, test the new configuration
-    if connector_update.connection_config:
-        try:
-            conn_instance = create_connector(connector.connector_type, connector_update.connection_config)
-            test_result = await conn_instance.test_connection()
-            
-            if test_result["status"] != "success":
-                raise HTTPException(status_code=400, detail=f"Connection test failed: {test_result['message']}")
-            
-            # Update schema info
-            schema_info = await conn_instance.get_schema()
-            connector.schema_info = json.dumps(schema_info)
-            connector.connection_config = encrypt_config(connector_update.connection_config)
-            connector.last_tested = datetime.utcnow()
-            
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Failed to update connector: {str(e)}")
-    
-    # Update other fields
-    update_data = connector_update.dict(exclude_unset=True, exclude={'connection_config'})
-    for field, value in update_data.items():
-        setattr(connector, field, value)
-    
+
+    # Update fields
+    if connector_update.name is not None:
+        connector.name = connector_update.name
+
+    if connector_update.configuration is not None:
+        connector.configuration = encryption_manager.encrypt(json.dumps(connector_update.configuration))
+
+    if connector_update.credentials is not None:
+        connector.credentials = encryption_manager.encrypt(json.dumps(connector_update.credentials))
+
+    if connector_update.properties is not None:
+        connector.properties = json.dumps(connector_update.properties)
+
+    if connector_update.is_active is not None:
+        connector.is_active = connector_update.is_active
+
+    connector.updated_at = datetime.utcnow()
+
     db.commit()
-    return {"status": "updated"}
+    db.refresh(connector)
+
+    # Return response with decrypted config
+    config = json.loads(encryption_manager.decrypt(connector.configuration))
+
+    return ConnectorResponse(
+        id=connector.id,
+        name=connector.name,
+        connector_type=connector.connector_type,
+        organization_id=connector.organization_id,
+        configuration=config,
+        properties=json.loads(connector.properties),
+        is_active=connector.is_active,
+        last_tested=connector.last_tested,
+        test_status=connector.test_status,
+        created_at=connector.created_at,
+        updated_at=connector.updated_at
+    )
+
 
 @app.delete("/api/v1/connectors/{connector_id}")
 async def delete_connector(
-    connector_id: str,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
+        connector_id: str,
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
 ):
     """Delete a connector"""
     connector = db.query(Connector).filter(
         Connector.id == connector_id,
-        Connector.tenant_id == tenant_id
+        Connector.organization_id == organization_id
     ).first()
-    
+
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
-    
+
     db.delete(connector)
     db.commit()
-    
-    return {"status": "deleted"}
 
-@app.post("/api/v1/connectors/{connector_id}/test")
-async def test_existing_connector(
-    connector_id: str,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
-):
-    """Test an existing connector"""
-    connector = db.query(Connector).filter(
-        Connector.id == connector_id,
-        Connector.tenant_id == tenant_id
-    ).first()
-    
-    if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
-    
-    try:
-        config = decrypt_config(connector.connection_config)
-        conn_instance = create_connector(connector.connector_type, config)
-        result = await conn_instance.test_connection()
-        
-        # Update last tested timestamp
-        connector.last_tested = datetime.utcnow()
-        if result["status"] == "success":
-            connector.status = "active"
-        else:
-            connector.status = "error"
-        
-        db.commit()
-        
-        return result
-    except Exception as e:
-        connector.status = "error"
-        db.commit()
-        return {"status": "error", "message": str(e)}
+    return {"message": "Connector deleted successfully"}
 
-@app.post("/api/v1/connectors/{connector_id}/preview")
-async def preview_connector_data(
-    connector_id: str,
-    preview_request: DataPreview,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
-):
-    """Preview data from a connector"""
-    connector = db.query(Connector).filter(
-        Connector.id == connector_id,
-        Connector.tenant_id == tenant_id
-    ).first()
-    
-    if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
-    
-    try:
-        config = decrypt_config(connector.connection_config)
-        conn_instance = create_connector(connector.connector_type, config)
-        
-        result = await conn_instance.preview_data(
-            table_name=preview_request.table_name,
-            query=preview_request.query,
-            limit=preview_request.limit
-        )
-        
-        return result
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-@app.get("/api/v1/connectors/{connector_id}/schema")
-async def get_connector_schema(
-    connector_id: str,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
-):
-    """Get schema information for a connector"""
-    connector = db.query(Connector).filter(
-        Connector.id == connector_id,
-        Connector.tenant_id == tenant_id
-    ).first()
-    
-    if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
-    
-    try:
-        # Return cached schema info or fetch fresh
-        if connector.schema_info:
-            return json.loads(connector.schema_info)
-        
-        config = decrypt_config(connector.connection_config)
-        conn_instance = create_connector(connector.connector_type, config)
-        schema_info = await conn_instance.get_schema()
-        
-        # Update cached schema info
-        connector.schema_info = json.dumps(schema_info)
-        db.commit()
-        
-        return schema_info
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-# Create tables
-Base.metadata.create_all(bind=engine)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8002) "success", "message": "Connection successful"}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-    
-    async def get_schema(self) -> Dict[str, Any]:
-        try:
-            conn_str = f"postgresql://{self.config['username']}:{self.config['password']}@{self.config['host']}:{self.config['port']}/{self.config['database']}"
-            engine = sql_create_engine(conn_str)
-            
-            schema_query = """
-            SELECT table_name, column_name, data_type, is_nullable
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-            ORDER BY table_name, ordinal_position
-            """
-            
-            with engine.connect() as conn:
-                result = conn.execute(schema_query)
-                rows = result.fetchall()
-                
-                tables = {}
-                for row in rows:
-                    table_name = row[0]
-                    if table_name not in tables:
-                        tables[table_name] = []
-                    
-                    tables[table_name].append({
-                        "name": row[1],
-                        "type": row[2],
-                        "nullable": row[3] == "YES"
-                    })
-                
-                return {"status": "success", "tables": tables}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-    
-    async def preview_data(self, table_name: str = None, query: str = None, limit: int = 100) -> Dict[str, Any]:
-        try:
-            conn_str = f"postgresql://{self.config['username']}:{self.config['password']}@{self.config['host']}:{self.config['port']}/{self.config['database']}"
-            engine = sql_create_engine(conn_str)
-            
-            if query:
-                # For security, limit custom queries
-                if not query.upper().strip().startswith('SELECT'):
-                    raise ValueError("Only SELECT queries are allowed")
-                sql_query = f"SELECT * FROM ({query}) subquery LIMIT {limit}"
-            elif table_name:
-                sql_query = f"SELECT * FROM {table_name} LIMIT {limit}"
-            else:
-                raise ValueError("Either table_name or query must be provided")
-            
-            with engine.connect() as conn:
-                result = conn.execute(sql_query)
-                rows = result.fetchall()
-                columns = list(result.keys())
-                
-                data = []
-                for row in rows:
-                    data.append(dict(zip(columns, row)))
-                
-                return {
-                    "status": "success",
-                    "columns": columns,
-                    "data": data,
-                    "row_count": len(data)
-                }
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8002,
+        reload=True,
+        log_level="info"
+    )("region", "us-east-1")
+    )
 
-class MySQLConnector(BaseConnector):
-    async def test_connection(self) -> Dict[str, Any]:
-        try:
-            import mysql.connector
-            conn = mysql.connector.connect(
-                host=self.config['host'],
-                port=self.config['port'],
-                user=self.config['username'],
-                password=self.config['password'],
-                database=self.config['database']
-            )
-            conn.close()
-            return {"status": "success", "message": "Connection successful"}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-    
-    async def get_schema(self) -> Dict[str, Any]:
-        try:
-            import mysql.connector
-            conn = mysql.connector.connect(
-                host=self.config['host'],
-                port=self.config['port'],
-                user=self.config['username'],
-                password=self.config['password'],
-                database=self.config['database']
-            )
-            
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT table_name, column_name, data_type, is_nullable
-                FROM information_schema.columns
-                WHERE table_schema = DATABASE()
-                ORDER BY table_name, ordinal_position
-            """)
-            
-            rows = cursor.fetchall()
-            tables = {}
-            for row in rows:
-                table_name = row[0]
-                if table_name not in tables:
-                    tables[table_name] = []
-                
-                tables[table_name].append({
-                    "name": row[1],
-                    "type": row[2],
-                    "nullable": row[3] == "YES"
-                })
-            
-            conn.close()
-            return {"status": "success", "tables": tables}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
-    
-    async def preview_data(self, table_name: str = None, query: str = None, limit: int = 100) -> Dict[str, Any]:
-        try:
-            import mysql.connector
-            conn = mysql.connector.connect(
-                host=self.config['host'],
-                port=self.config['port'],
-                user=self.config['username'],
-                password=self.config['password'],
-                database=self.config['database']
-            )
-            
-            cursor = conn.cursor(dictionary=True)
-            
-            if query:
-                if not query.upper().strip().startswith('SELECT'):
-                    raise ValueError("Only SELECT queries are allowed")
-                sql_query = f"SELECT * FROM ({query}) subquery LIMIT {limit}"
-            elif table_name:
-                sql_query = f"SELECT * FROM {table_name} LIMIT {limit}"
-            else:
-                raise ValueError("Either table_name or query must be provided")
-            
-            cursor.execute(sql_query)
-            rows = cursor.fetchall()
-            columns = list(rows[0].keys()) if rows else []
-            
-            conn.close()
-            return {
-                "status": "success",
-                "columns": columns,
-                "data": rows,
-                "row_count": len(rows)
-            }
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
+    bucket_name = self.config["bucket_name"]
+    s3_client.head_bucket(Bucket=bucket_name)
+    return True
 
-class MongoDBConnector(BaseConnector):
-    async def test_connection(self) -> Dict[str, Any]:
-        try:
-            connection_string = f"mongodb://{self.config['username']}:{self.config['password']}@{self.config['host']}:{self.config['port']}/{self.config['database']}"
-            client = pymongo.MongoClient(connection_string)
-            client.server_info()  # Trigger connection
-            client.close()
-            return {"status": "success", "message": "Connection successful"}
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
+except Exception as e:
+logger.error(f"S3 connection test failed: {str(e)}")
+return False
+
+
+async def get_schema(self) -> Dict:
+    """Get S3 bucket structure"""
+    try:
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=self.credentials["access_key_id"],
+            aws_secret_access_key=self.credentials["secret_access_key"],
+            region_name=self.config.get

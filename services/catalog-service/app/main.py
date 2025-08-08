@@ -1,99 +1,354 @@
-# services/catalog-service/app/main.py
-from fastapi import FastAPI, HTTPException, Depends, Header
-from fastapi.middleware.cors import CORSMiddleware
-import asyncio
+"""
+Multi-Tenant Catalog Service
+Unity Catalog and Apache Iceberg table management service
+"""
+import logging
 import os
 import json
+from contextlib import asynccontextmanager
+from typing import Dict, List, Optional, Any
 from datetime import datetime
-from typing import Optional, List, Dict, Any
-from pydantic import BaseModel
-import httpx
+
 import uvicorn
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Boolean
+from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
+from sqlalchemy import create_engine, Column, String, DateTime, Text, Boolean, Integer
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
+import requests
 import boto3
+from databricks_cli.sdk.api_client import ApiClient
+from databricks_cli.unity_catalog.api import UnityCatalogApi
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Database setup
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/catalog_db")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/multi_tenant_ingestion")
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# AWS clients
-s3_client = boto3.client('s3')
-glue_client = boto3.client('glue')
+# Security
+security = HTTPBearer()
+
 
 # Models
 class Catalog(Base):
     __tablename__ = "catalogs"
-    
-    id = Column(String, primary_key=True)
-    tenant_id = Column(String, nullable=False, index=True)
-    name = Column(String, nullable=False)
-    description = Column(Text)
-    unity_catalog_name = Column(String, nullable=False)
-    s3_location = Column(String, nullable=False)
+
+    id = Column(String, primary_key=True, index=True)
+    name = Column(String, index=True)
+    organization_id = Column(String, index=True)
+    unity_catalog_id = Column(String, unique=True)
+    storage_location = Column(String)
+    metastore_id = Column(String)
+    properties = Column(Text)  # JSON string
+    is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    created_by = Column(String)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 
 class Schema(Base):
     __tablename__ = "schemas"
-    
-    id = Column(String, primary_key=True)
-    catalog_id = Column(String, nullable=False, index=True)
-    tenant_id = Column(String, nullable=False, index=True)
-    name = Column(String, nullable=False)
-    description = Column(Text)
-    unity_schema_name = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
 
-class Table(Base):
-    __tablename__ = "tables"
-    
-    id = Column(String, primary_key=True)
-    schema_id = Column(String, nullable=False, index=True)
-    tenant_id = Column(String, nullable=False, index=True)
-    name = Column(String, nullable=False)
-    description = Column(Text)
-    table_type = Column(String, default="iceberg")  # iceberg, delta, external
-    unity_table_name = Column(String, nullable=False)
-    s3_location = Column(String)
-    partition_columns = Column(Text)  # JSON array
-    schema_definition = Column(Text)  # JSON
-    properties = Column(Text)  # JSON
+    id = Column(String, primary_key=True, index=True)
+    name = Column(String, index=True)
+    catalog_id = Column(String, index=True)
+    organization_id = Column(String, index=True)
+    unity_schema_id = Column(String)
+    properties = Column(Text)
+    is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    last_updated = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class IcebergTable(Base):
+    __tablename__ = "iceberg_tables"
+
+    id = Column(String, primary_key=True, index=True)
+    name = Column(String, index=True)
+    schema_id = Column(String, index=True)
+    catalog_id = Column(String, index=True)
+    organization_id = Column(String, index=True)
+    table_location = Column(String)
+    metadata_location = Column(String)
+    table_schema = Column(Text)  # JSON string
+    partition_spec = Column(Text)  # JSON string
+    properties = Column(Text)  # JSON string
+    format_version = Column(Integer, default=2)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 
 # Pydantic models
 class CatalogCreate(BaseModel):
     name: str
-    description: Optional[str] = None
+    storage_location: Optional[str] = None
+    properties: Optional[Dict] = {}
+
+
+class CatalogResponse(BaseModel):
+    id: str
+    name: str
+    organization_id: str
+    unity_catalog_id: str
+    storage_location: Optional[str]
+    metastore_id: str
+    properties: Dict
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
 
 class SchemaCreate(BaseModel):
+    name: str
     catalog_id: str
-    name: str
-    description: Optional[str] = None
+    properties: Optional[Dict] = {}
 
-class TableCreate(BaseModel):
+
+class SchemaResponse(BaseModel):
+    id: str
+    name: str
+    catalog_id: str
+    organization_id: str
+    unity_schema_id: str
+    properties: Dict
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class IcebergTableCreate(BaseModel):
+    name: str
     schema_id: str
-    name: str
-    description: Optional[str] = None
-    table_type: str = "iceberg"
-    partition_columns: Optional[List[str]] = []
-    schema_definition: List[Dict[str, Any]]
-    properties: Optional[Dict[str, Any]] = {}
+    table_schema: Dict  # Iceberg table schema
+    partition_spec: Optional[List[Dict]] = []
+    properties: Optional[Dict] = {}
 
-class TableUpdate(BaseModel):
-    description: Optional[str] = None
-    schema_definition: Optional[List[Dict[str, Any]]] = None
-    properties: Optional[Dict[str, Any]] = None
+
+class IcebergTableResponse(BaseModel):
+    id: str
+    name: str
+    schema_id: str
+    catalog_id: str
+    organization_id: str
+    table_location: str
+    metadata_location: str
+    table_schema: Dict
+    partition_spec: List[Dict]
+    properties: Dict
+    format_version: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class TableMetrics(BaseModel):
+    total_files: int
+    total_size_bytes: int
+    record_count: int
+    last_updated: datetime
+
+
+# Database dependency
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# Authentication dependency
+async def get_current_organization(
+        authorization: HTTPAuthorizationCredentials = Depends(security),
+        x_organization_id: Optional[str] = Header(None)
+) -> str:
+    if not x_organization_id:
+        raise HTTPException(status_code=401, detail="Organization ID required")
+    return x_organization_id
+
+
+class UnityCatalogManager:
+    """Manages Unity Catalog operations"""
+
+    def __init__(self, organization_id: str):
+        self.organization_id = organization_id
+        self.workspace_url = self._get_workspace_url(organization_id)
+        self.token = self._get_databricks_token(organization_id)
+        self.api_client = ApiClient(host=self.workspace_url, token=self.token)
+        self.unity_api = UnityCatalogApi(self.api_client)
+
+    def _get_workspace_url(self, org_id: str) -> str:
+        return f"https://{org_id}.databricks.com"
+
+    def _get_databricks_token(self, org_id: str) -> str:
+        return os.getenv(f"DATABRICKS_TOKEN_{org_id.upper()}", "dapi-default-token")
+
+    async def create_catalog(self, name: str, storage_location: str = None) -> Dict:
+        """Create a new Unity Catalog"""
+        catalog_config = {
+            "name": f"{self.organization_id}_{name}",
+            "comment": f"Catalog for organization {self.organization_id}",
+            "properties": {
+                "organization_id": self.organization_id,
+                "created_by": "multi-tenant-ingestion-service"
+            }
+        }
+
+        if storage_location:
+            catalog_config["storage_root"] = storage_location
+
+        try:
+            response = self.unity_api.create_catalog(catalog_config)
+            return response
+        except Exception as e:
+            logger.error(f"Failed to create Unity Catalog: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Unity Catalog creation failed: {str(e)}")
+
+    async def create_schema(self, catalog_name: str, schema_name: str) -> Dict:
+        """Create a new schema in Unity Catalog"""
+        full_catalog_name = f"{self.organization_id}_{catalog_name}"
+        schema_config = {
+            "name": schema_name,
+            "catalog_name": full_catalog_name,
+            "comment": f"Schema {schema_name} for organization {self.organization_id}",
+            "properties": {
+                "organization_id": self.organization_id
+            }
+        }
+
+        try:
+            response = self.unity_api.create_schema(schema_config)
+            return response
+        except Exception as e:
+            logger.error(f"Failed to create schema: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Schema creation failed: {str(e)}")
+
+    async def list_catalogs(self) -> List[Dict]:
+        """List all catalogs for the organization"""
+        try:
+            catalogs = self.unity_api.list_catalogs()
+            # Filter catalogs for this organization
+            org_catalogs = [
+                cat for cat in catalogs.get("catalogs", [])
+                if cat["name"].startswith(f"{self.organization_id}_")
+            ]
+            return org_catalogs
+        except Exception as e:
+            logger.error(f"Failed to list catalogs: {str(e)}")
+            return []
+
+
+class IcebergManager:
+    """Manages Apache Iceberg table operations"""
+
+    def __init__(self, organization_id: str):
+        self.organization_id = organization_id
+        self.s3_client = boto3.client('s3')
+        self.bucket_name = f"iceberg-{organization_id}"
+
+    async def create_table(self, catalog_name: str, schema_name: str, table_name: str,
+                           table_schema: Dict, partition_spec: List[Dict] = None) -> Dict:
+        """Create an Iceberg table"""
+        table_location = f"s3://{self.bucket_name}/{catalog_name}/{schema_name}/{table_name}/"
+        metadata_location = f"{table_location}metadata/"
+
+        # Create table metadata
+        table_metadata = {
+            "format-version": 2,
+            "table-uuid": self._generate_uuid(),
+            "location": table_location,
+            "last-sequence-number": 0,
+            "last-updated-ms": int(datetime.utcnow().timestamp() * 1000),
+            "last-column-id": len(table_schema.get("fields", [])),
+            "schema": table_schema,
+            "partition-spec": partition_spec or [],
+            "default-spec-id": 0,
+            "last-partition-id": len(partition_spec) if partition_spec else 0,
+            "properties": {
+                "organization_id": self.organization_id,
+                "created_by": "multi-tenant-ingestion-service"
+            },
+            "snapshots": [],
+            "snapshot-log": [],
+            "metadata-log": []
+        }
+
+        # Store metadata in S3
+        metadata_key = f"{metadata_location}v1.metadata.json"
+        self.s3_client.put_object(
+            Bucket=self.bucket_name,
+            Key=metadata_key,
+            Body=json.dumps(table_metadata),
+            ContentType="application/json"
+        )
+
+        return {
+            "table_location": table_location,
+            "metadata_location": f"s3://{self.bucket_name}/{metadata_key}",
+            "table_metadata": table_metadata
+        }
+
+    async def get_table_metrics(self, table_location: str) -> Dict:
+        """Get metrics for an Iceberg table"""
+        try:
+            # Parse S3 location
+            bucket = table_location.replace("s3://", "").split("/")[0]
+            prefix = "/".join(table_location.replace("s3://", "").split("/")[1:])
+
+            # List objects in table location
+            response = self.s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+
+            total_files = 0
+            total_size = 0
+
+            for obj in response.get("Contents", []):
+                if obj["Key"].endswith((".parquet", ".orc", ".avro")):
+                    total_files += 1
+                    total_size += obj["Size"]
+
+            return {
+                "total_files": total_files,
+                "total_size_bytes": total_size,
+                "record_count": 0,  # Would need to read metadata for exact count
+                "last_updated": datetime.utcnow()
+            }
+        except Exception as e:
+            logger.error(f"Failed to get table metrics: {str(e)}")
+            return {
+                "total_files": 0,
+                "total_size_bytes": 0,
+                "record_count": 0,
+                "last_updated": datetime.utcnow()
+            }
+
+    def _generate_uuid(self) -> str:
+        import uuid
+        return str(uuid.uuid4())
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    Base.metadata.create_all(bind=engine)
+    logger.info("Catalog Service started")
+    yield
+    # Shutdown
+    logger.info("Catalog Service shutting down")
+
 
 # FastAPI app
 app = FastAPI(
     title="Multi-Tenant Catalog Service",
-    description="Unity Catalog and Iceberg table management service",
-    version="1.0.0"
+    description="Unity Catalog and Apache Iceberg management service",
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 app.add_middleware(
@@ -104,645 +359,302 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database dependency
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
-# Tenant extraction
-async def get_tenant_id(x_tenant_id: str = Header(alias="X-Tenant-ID")):
-    if not x_tenant_id:
-        raise HTTPException(status_code=400, detail="X-Tenant-ID header required")
-    return x_tenant_id
-
-# Unity Catalog integration
-class UnityCatalogClient:
-    def __init__(self):
-        self.databricks_host = os.getenv("DATABRICKS_HOST")
-        self.token = os.getenv("DATABRICKS_TOKEN")
-        self.headers = {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json"
-        }
-    
-    async def create_catalog(self, tenant_id: str, catalog_name: str, comment: str = None) -> Dict[str, Any]:
-        """Create a Unity Catalog catalog for a tenant"""
-        unity_catalog_name = f"{tenant_id}_{catalog_name}"
-        
-        payload = {
-            "name": unity_catalog_name,
-            "comment": comment or f"Catalog for tenant {tenant_id}",
-            "properties": {
-                "tenant_id": tenant_id,
-                "managed_by": "multi-tenant-ingestion"
-            }
-        }
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.databricks_host}/api/2.1/unity-catalog/catalogs",
-                headers=self.headers,
-                json=payload
-            )
-            
-            if response.status_code not in [200, 201]:
-                raise HTTPException(
-                    status_code=500, 
-                    detail=f"Unity Catalog API error: {response.text}"
-                )
-            
-            return response.json()
-    
-    async def create_schema(self, catalog_name: str, schema_name: str, comment: str = None) -> Dict[str, Any]:
-        """Create a schema in Unity Catalog"""
-        payload = {
-            "name": f"{catalog_name}.{schema_name}",
-            "catalog_name": catalog_name,
-            "comment": comment or f"Schema {schema_name}",
-        }
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.databricks_host}/api/2.1/unity-catalog/schemas",
-                headers=self.headers,
-                json=payload
-            )
-            
-            if response.status_code not in [200, 201]:
-                raise HTTPException(
-                    status_code=500, 
-                    detail=f"Unity Catalog API error: {response.text}"
-                )
-            
-            return response.json()
-    
-    async def create_table(self, catalog_name: str, schema_name: str, table_spec: Dict[str, Any]) -> Dict[str, Any]:
-        """Create an Iceberg table in Unity Catalog"""
-        table_name = table_spec["name"]
-        full_table_name = f"{catalog_name}.{schema_name}.{table_name}"
-        
-        # Convert schema definition to Unity Catalog format
-        columns = []
-        for col in table_spec["schema_definition"]:
-            columns.append({
-                "name": col["name"],
-                "type_text": col["type"],
-                "comment": col.get("comment", ""),
-                "nullable": col.get("nullable", True)
-            })
-        
-        payload = {
-            "name": full_table_name,
-            "catalog_name": catalog_name,
-            "schema_name": schema_name,
-            "table_type": "MANAGED",
-            "data_source_format": "ICEBERG",
-            "columns": columns,
-            "comment": table_spec.get("description", ""),
-            "properties": table_spec.get("properties", {})
-        }
-        
-        # Add partition information if provided
-        if table_spec.get("partition_columns"):
-            payload["partition_columns"] = table_spec["partition_columns"]
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.databricks_host}/api/2.1/unity-catalog/tables",
-                headers=self.headers,
-                json=payload
-            )
-            
-            if response.status_code not in [200, 201]:
-                raise HTTPException(
-                    status_code=500, 
-                    detail=f"Unity Catalog API error: {response.text}"
-                )
-            
-            return response.json()
-    
-    async def get_table_info(self, full_table_name: str) -> Dict[str, Any]:
-        """Get table information from Unity Catalog"""
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.databricks_host}/api/2.1/unity-catalog/tables/{full_table_name}",
-                headers=self.headers
-            )
-            
-            if response.status_code != 200:
-                raise HTTPException(
-                    status_code=500, 
-                    detail=f"Unity Catalog API error: {response.text}"
-                )
-            
-            return response.json()
-
-unity_client = UnityCatalogClient()
-
-# Helper functions
-def get_tenant_s3_location(tenant_id: str) -> str:
-    """Generate S3 location for tenant data"""
-    bucket = os.getenv("S3_DATA_BUCKET", "multi-tenant-data")
-    return f"s3://{bucket}/{tenant_id}/"
-
-def create_glue_table(tenant_id: str, table_spec: Dict[str, Any], s3_location: str):
-    """Create Glue table for cross-platform compatibility"""
-    database_name = f"{tenant_id}_catalog"
-    table_name = table_spec["name"]
-    
-    # Ensure Glue database exists
-    try:
-        glue_client.create_database(
-            DatabaseInput={
-                'Name': database_name,
-                'Description': f'Glue database for tenant {tenant_id}'
-            }
-        )
-    except glue_client.exceptions.AlreadyExistsException:
-        pass
-    
-    # Convert schema to Glue format
-    columns = []
-    for col in table_spec["schema_definition"]:
-        glue_type = convert_to_glue_type(col["type"])
-        columns.append({
-            'Name': col["name"],
-            'Type': glue_type,
-            'Comment': col.get("comment", "")
-        })
-    
-    # Create Glue table
-    table_input = {
-        'Name': table_name,
-        'Description': table_spec.get("description", ""),
-        'StorageDescriptor': {
-            'Columns': columns,
-            'Location': s3_location,
-            'InputFormat': 'org.apache.iceberg.mr.mapreduce.IcebergInputFormat',
-            'OutputFormat': 'org.apache.iceberg.mr.mapreduce.IcebergOutputFormat',
-            'SerdeInfo': {
-                'SerializationLibrary': 'org.apache.iceberg.mr.hive.HiveIcebergSerDe'
-            }
-        },
-        'Parameters': {
-            'table_type': 'ICEBERG',
-            'tenant_id': tenant_id,
-            **table_spec.get("properties", {})
-        }
-    }
-    
-    if table_spec.get("partition_columns"):
-        table_input['PartitionKeys'] = [
-            {'Name': col, 'Type': 'string'} for col in table_spec["partition_columns"]
-        ]
-    
-    glue_client.create_table(
-        DatabaseName=database_name,
-        TableInput=table_input
-    )
-
-def convert_to_glue_type(unity_type: str) -> str:
-    """Convert Unity Catalog types to Glue types"""
-    type_mapping = {
-        'string': 'string',
-        'int': 'int',
-        'bigint': 'bigint',
-        'double': 'double',
-        'float': 'float',
-        'boolean': 'boolean',
-        'timestamp': 'timestamp',
-        'date': 'date',
-        'decimal': 'decimal',
-        'binary': 'binary'
-    }
-    return type_mapping.get(unity_type.lower(), 'string')
-
-# API Routes
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "catalog-service", "timestamp": datetime.utcnow()}
+    return {"status": "healthy", "service": "catalog-service"}
+
 
 @app.get("/health/unity-catalog")
-async def health_unity_catalog():
+async def unity_catalog_health(organization_id: str = Depends(get_current_organization)):
     try:
-        headers = {"Authorization": f"Bearer {unity_client.token}"}
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{unity_client.databricks_host}/api/2.1/unity-catalog/catalogs",
-                headers=headers
-            )
-            if response.status_code == 200:
-                return {"status": "healthy", "component": "unity-catalog"}
-            else:
-                raise HTTPException(status_code=503, detail="Unity Catalog API error")
+        unity_manager = UnityCatalogManager(organization_id)
+        catalogs = await unity_manager.list_catalogs()
+        return {"status": "healthy", "unity_catalog": "connected", "catalogs": len(catalogs)}
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Unity Catalog unhealthy: {str(e)}")
 
-@app.post("/api/v1/catalogs")
+
+@app.post("/api/v1/catalogs", response_model=CatalogResponse)
 async def create_catalog(
-    catalog: CatalogCreate,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
+        catalog: CatalogCreate,
+        background_tasks: BackgroundTasks,
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
 ):
-    """Create a new catalog for the tenant"""
-    catalog_id = f"catalog_{tenant_id}_{int(datetime.utcnow().timestamp())}"
-    unity_catalog_name = f"{tenant_id}_{catalog.name}"
-    s3_location = get_tenant_s3_location(tenant_id)
-    
-    # Create Unity Catalog
-    try:
-        unity_response = await unity_client.create_catalog(
-            tenant_id, catalog.name, catalog.description
-        )
-        
-        # Store in local database
-        db_catalog = Catalog(
-            id=catalog_id,
-            tenant_id=tenant_id,
-            name=catalog.name,
-            description=catalog.description,
-            unity_catalog_name=unity_catalog_name,
-            s3_location=s3_location
-        )
-        
-        db.add(db_catalog)
-        db.commit()
-        db.refresh(db_catalog)
-        
-        return {
-            "catalog_id": catalog_id,
-            "unity_catalog_name": unity_catalog_name,
-            "status": "created"
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create catalog: {str(e)}")
+    """Create a new catalog"""
+    import uuid
 
-@app.get("/api/v1/catalogs")
+    catalog_id = str(uuid.uuid4())
+
+    # Create in Unity Catalog
+    unity_manager = UnityCatalogManager(organization_id)
+
+    # Generate S3 storage location
+    storage_location = catalog.storage_location or f"s3://iceberg-{organization_id}/{catalog.name}/"
+
+    unity_catalog = await unity_manager.create_catalog(catalog.name, storage_location)
+
+    # Store in database
+    db_catalog = Catalog(
+        id=catalog_id,
+        name=catalog.name,
+        organization_id=organization_id,
+        unity_catalog_id=unity_catalog["name"],
+        storage_location=storage_location,
+        metastore_id=unity_catalog.get("metastore_id", "default"),
+        properties=json.dumps(catalog.properties)
+    )
+
+    db.add(db_catalog)
+    db.commit()
+    db.refresh(db_catalog)
+
+    return CatalogResponse(
+        id=db_catalog.id,
+        name=db_catalog.name,
+        organization_id=db_catalog.organization_id,
+        unity_catalog_id=db_catalog.unity_catalog_id,
+        storage_location=db_catalog.storage_location,
+        metastore_id=db_catalog.metastore_id,
+        properties=json.loads(db_catalog.properties),
+        is_active=db_catalog.is_active,
+        created_at=db_catalog.created_at,
+        updated_at=db_catalog.updated_at
+    )
+
+
+@app.get("/api/v1/catalogs", response_model=List[CatalogResponse])
 async def list_catalogs(
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
 ):
-    """List all catalogs for the tenant"""
-    catalogs = db.query(Catalog).filter(Catalog.tenant_id == tenant_id).all()
-    
-    result = []
-    for catalog in catalogs:
-        result.append({
-            "id": catalog.id,
-            "name": catalog.name,
-            "description": catalog.description,
-            "unity_catalog_name": catalog.unity_catalog_name,
-            "s3_location": catalog.s3_location,
-            "created_at": catalog.created_at
-        })
-    
-    return {"catalogs": result}
+    """List all catalogs for the organization"""
+    catalogs = db.query(Catalog).filter(Catalog.organization_id == organization_id).all()
 
-@app.post("/api/v1/schemas")
+    return [
+        CatalogResponse(
+            id=cat.id,
+            name=cat.name,
+            organization_id=cat.organization_id,
+            unity_catalog_id=cat.unity_catalog_id,
+            storage_location=cat.storage_location,
+            metastore_id=cat.metastore_id,
+            properties=json.loads(cat.properties),
+            is_active=cat.is_active,
+            created_at=cat.created_at,
+            updated_at=cat.updated_at
+        )
+        for cat in catalogs
+    ]
+
+
+@app.post("/api/v1/schemas", response_model=SchemaResponse)
 async def create_schema(
-    schema: SchemaCreate,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
+        schema: SchemaCreate,
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
 ):
-    """Create a new schema in a catalog"""
-    # Verify catalog belongs to tenant
+    """Create a new schema"""
+    import uuid
+
+    # Verify catalog exists and belongs to organization
     catalog = db.query(Catalog).filter(
         Catalog.id == schema.catalog_id,
-        Catalog.tenant_id == tenant_id
+        Catalog.organization_id == organization_id
     ).first()
-    
-    if not catalog:
-        raise HTTPException(status_code=404, detail="Catalog not found")
-    
-    schema_id = f"schema_{tenant_id}_{int(datetime.utcnow().timestamp())}"
-    unity_schema_name = f"{tenant_id}_{schema.name}"
-    
-    try:
-        # Create Unity Catalog schema
-        unity_response = await unity_client.create_schema(
-            catalog.unity_catalog_name, schema.name, schema.description
-        )
-        
-        # Store in local database
-        db_schema = Schema(
-            id=schema_id,
-            catalog_id=schema.catalog_id,
-            tenant_id=tenant_id,
-            name=schema.name,
-            description=schema.description,
-            unity_schema_name=unity_schema_name
-        )
-        
-        db.add(db_schema)
-        db.commit()
-        db.refresh(db_schema)
-        
-        return {
-            "schema_id": schema_id,
-            "unity_schema_name": unity_schema_name,
-            "status": "created"
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create schema: {str(e)}")
 
-@app.get("/api/v1/catalogs/{catalog_id}/schemas")
-async def list_schemas(
-    catalog_id: str,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
-):
-    """List all schemas in a catalog"""
-    # Verify catalog belongs to tenant
-    catalog = db.query(Catalog).filter(
-        Catalog.id == catalog_id,
-        Catalog.tenant_id == tenant_id
-    ).first()
-    
     if not catalog:
         raise HTTPException(status_code=404, detail="Catalog not found")
-    
+
+    schema_id = str(uuid.uuid4())
+
+    # Create in Unity Catalog
+    unity_manager = UnityCatalogManager(organization_id)
+    unity_schema = await unity_manager.create_schema(catalog.name, schema.name)
+
+    # Store in database
+    db_schema = Schema(
+        id=schema_id,
+        name=schema.name,
+        catalog_id=schema.catalog_id,
+        organization_id=organization_id,
+        unity_schema_id=f"{unity_schema['catalog_name']}.{unity_schema['name']}",
+        properties=json.dumps(schema.properties)
+    )
+
+    db.add(db_schema)
+    db.commit()
+    db.refresh(db_schema)
+
+    return SchemaResponse(
+        id=db_schema.id,
+        name=db_schema.name,
+        catalog_id=db_schema.catalog_id,
+        organization_id=db_schema.organization_id,
+        unity_schema_id=db_schema.unity_schema_id,
+        properties=json.loads(db_schema.properties),
+        is_active=db_schema.is_active,
+        created_at=db_schema.created_at,
+        updated_at=db_schema.updated_at
+    )
+
+
+@app.get("/api/v1/catalogs/{catalog_id}/schemas", response_model=List[SchemaResponse])
+async def list_schemas(
+        catalog_id: str,
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
+):
+    """List schemas in a catalog"""
     schemas = db.query(Schema).filter(
         Schema.catalog_id == catalog_id,
-        Schema.tenant_id == tenant_id
+        Schema.organization_id == organization_id
     ).all()
-    
-    result = []
-    for schema in schemas:
-        result.append({
-            "id": schema.id,
-            "name": schema.name,
-            "description": schema.description,
-            "unity_schema_name": schema.unity_schema_name,
-            "created_at": schema.created_at
-        })
-    
-    return {"schemas": result}
 
-@app.post("/api/v1/tables")
-async def create_table(
-    table: TableCreate,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
+    return [
+        SchemaResponse(
+            id=sch.id,
+            name=sch.name,
+            catalog_id=sch.catalog_id,
+            organization_id=sch.organization_id,
+            unity_schema_id=sch.unity_schema_id,
+            properties=json.loads(sch.properties),
+            is_active=sch.is_active,
+            created_at=sch.created_at,
+            updated_at=sch.updated_at
+        )
+        for sch in schemas
+    ]
+
+
+@app.post("/api/v1/tables", response_model=IcebergTableResponse)
+async def create_iceberg_table(
+        table: IcebergTableCreate,
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
 ):
-    """Create a new table in a schema"""
-    # Verify schema belongs to tenant
+    """Create a new Iceberg table"""
+    import uuid
+
+    # Verify schema exists and belongs to organization
     schema = db.query(Schema).filter(
         Schema.id == table.schema_id,
-        Schema.tenant_id == tenant_id
+        Schema.organization_id == organization_id
     ).first()
-    
+
     if not schema:
         raise HTTPException(status_code=404, detail="Schema not found")
-    
-    # Get catalog info
+
+    # Get catalog
     catalog = db.query(Catalog).filter(Catalog.id == schema.catalog_id).first()
-    
-    table_id = f"table_{tenant_id}_{int(datetime.utcnow().timestamp())}"
-    unity_table_name = f"{catalog.unity_catalog_name}.{schema.unity_schema_name}.{table.name}"
-    s3_location = f"{catalog.s3_location}{schema.name}/{table.name}/"
-    
-    try:
-        # Prepare table specification
-        table_spec = {
-            "name": table.name,
-            "description": table.description,
-            "schema_definition": table.schema_definition,
-            "partition_columns": table.partition_columns,
-            "properties": table.properties
-        }
-        
-        # Create Unity Catalog table
-        unity_response = await unity_client.create_table(
-            catalog.unity_catalog_name, schema.unity_schema_name, table_spec
-        )
-        
-        # Create Glue table for cross-platform access
-        try:
-            create_glue_table(tenant_id, table_spec, s3_location)
-        except Exception as glue_error:
-            print(f"Warning: Failed to create Glue table: {glue_error}")
-        
-        # Store in local database
-        db_table = Table(
-            id=table_id,
-            schema_id=table.schema_id,
-            tenant_id=tenant_id,
-            name=table.name,
-            description=table.description,
-            table_type=table.table_type,
-            unity_table_name=unity_table_name,
-            s3_location=s3_location,
-            partition_columns=json.dumps(table.partition_columns),
-            schema_definition=json.dumps(table.schema_definition),
-            properties=json.dumps(table.properties)
-        )
-        
-        db.add(db_table)
-        db.commit()
-        db.refresh(db_table)
-        
-        return {
-            "table_id": table_id,
-            "unity_table_name": unity_table_name,
-            "s3_location": s3_location,
-            "status": "created"
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create table: {str(e)}")
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
 
-@app.get("/api/v1/schemas/{schema_id}/tables")
-async def list_tables(
-    schema_id: str,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
-):
-    """List all tables in a schema"""
-    # Verify schema belongs to tenant
-    schema = db.query(Schema).filter(
-        Schema.id == schema_id,
-        Schema.tenant_id == tenant_id
-    ).first()
-    
-    if not schema:
-        raise HTTPException(status_code=404, detail="Schema not found")
-    
-    tables = db.query(Table).filter(
-        Table.schema_id == schema_id,
-        Table.tenant_id == tenant_id
-    ).all()
-    
-    result = []
-    for table in tables:
-        result.append({
-            "id": table.id,
-            "name": table.name,
-            "description": table.description,
-            "table_type": table.table_type,
-            "unity_table_name": table.unity_table_name,
-            "s3_location": table.s3_location,
-            "partition_columns": json.loads(table.partition_columns or "[]"),
-            "created_at": table.created_at,
-            "last_updated": table.last_updated
-        })
-    
-    return {"tables": result}
+    table_id = str(uuid.uuid4())
 
-@app.get("/api/v1/tables/{table_id}")
-async def get_table(
-    table_id: str,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
-):
-    """Get detailed table information"""
-    table = db.query(Table).filter(
-        Table.id == table_id,
-        Table.tenant_id == tenant_id
-    ).first()
-    
-    if not table:
-        raise HTTPException(status_code=404, detail="Table not found")
-    
-    # Get live information from Unity Catalog
-    try:
-        unity_info = await unity_client.get_table_info(table.unity_table_name)
-        
-        return {
-            "id": table.id,
-            "name": table.name,
-            "description": table.description,
-            "table_type": table.table_type,
-            "unity_table_name": table.unity_table_name,
-            "s3_location": table.s3_location,
-            "partition_columns": json.loads(table.partition_columns or "[]"),
-            "schema_definition": json.loads(table.schema_definition),
-            "properties": json.loads(table.properties or "{}"),
-            "created_at": table.created_at,
-            "last_updated": table.last_updated,
-            "unity_catalog_info": unity_info
-        }
-        
-    except Exception as e:
-        # Return local information if Unity Catalog is unavailable
-        return {
-            "id": table.id,
-            "name": table.name,
-            "description": table.description,
-            "table_type": table.table_type,
-            "unity_table_name": table.unity_table_name,
-            "s3_location": table.s3_location,
-            "partition_columns": json.loads(table.partition_columns or "[]"),
-            "schema_definition": json.loads(table.schema_definition),
-            "properties": json.loads(table.properties or "{}"),
-            "created_at": table.created_at,
-            "last_updated": table.last_updated,
-            "error": f"Could not fetch live Unity Catalog info: {str(e)}"
-        }
+    # Create Iceberg table
+    iceberg_manager = IcebergManager(organization_id)
+    iceberg_result = await iceberg_manager.create_table(
+        catalog.name, schema.name, table.name,
+        table.table_schema, table.partition_spec
+    )
 
-@app.put("/api/v1/tables/{table_id}")
-async def update_table(
-    table_id: str,
-    table_update: TableUpdate,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
-):
-    """Update table metadata"""
-    table = db.query(Table).filter(
-        Table.id == table_id,
-        Table.tenant_id == tenant_id
-    ).first()
-    
-    if not table:
-        raise HTTPException(status_code=404, detail="Table not found")
-    
-    # Update local metadata
-    update_data = table_update.dict(exclude_unset=True)
-    for field, value in update_data.items():
-        if field in ["schema_definition", "properties"] and value:
-            setattr(table, field, json.dumps(value))
-        else:
-            setattr(table, field, value)
-    
-    table.last_updated = datetime.utcnow()
+    # Store in database
+    db_table = IcebergTable(
+        id=table_id,
+        name=table.name,
+        schema_id=table.schema_id,
+        catalog_id=schema.catalog_id,
+        organization_id=organization_id,
+        table_location=iceberg_result["table_location"],
+        metadata_location=iceberg_result["metadata_location"],
+        table_schema=json.dumps(table.table_schema),
+        partition_spec=json.dumps(table.partition_spec),
+        properties=json.dumps(table.properties)
+    )
+
+    db.add(db_table)
     db.commit()
-    
-    return {"status": "updated"}
+    db.refresh(db_table)
 
-@app.get("/api/v1/tables/{table_id}/lineage")
-async def get_table_lineage(
-    table_id: str,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
+    return IcebergTableResponse(
+        id=db_table.id,
+        name=db_table.name,
+        schema_id=db_table.schema_id,
+        catalog_id=db_table.catalog_id,
+        organization_id=db_table.organization_id,
+        table_location=db_table.table_location,
+        metadata_location=db_table.metadata_location,
+        table_schema=json.loads(db_table.table_schema),
+        partition_spec=json.loads(db_table.partition_spec),
+        properties=json.loads(db_table.properties),
+        format_version=db_table.format_version,
+        is_active=db_table.is_active,
+        created_at=db_table.created_at,
+        updated_at=db_table.updated_at
+    )
+
+
+@app.get("/api/v1/schemas/{schema_id}/tables", response_model=List[IcebergTableResponse])
+async def list_tables(
+        schema_id: str,
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
 ):
-    """Get data lineage for a table"""
-    table = db.query(Table).filter(
-        Table.id == table_id,
-        Table.tenant_id == tenant_id
+    """List tables in a schema"""
+    tables = db.query(IcebergTable).filter(
+        IcebergTable.schema_id == schema_id,
+        IcebergTable.organization_id == organization_id
+    ).all()
+
+    return [
+        IcebergTableResponse(
+            id=tbl.id,
+            name=tbl.name,
+            schema_id=tbl.schema_id,
+            catalog_id=tbl.catalog_id,
+            organization_id=tbl.organization_id,
+            table_location=tbl.table_location,
+            metadata_location=tbl.metadata_location,
+            table_schema=json.loads(tbl.table_schema),
+            partition_spec=json.loads(tbl.partition_spec),
+            properties=json.loads(tbl.properties),
+            format_version=tbl.format_version,
+            is_active=tbl.is_active,
+            created_at=tbl.created_at,
+            updated_at=tbl.updated_at
+        )
+        for tbl in tables
+    ]
+
+
+@app.get("/api/v1/tables/{table_id}/metrics", response_model=TableMetrics)
+async def get_table_metrics(
+        table_id: str,
+        organization_id: str = Depends(get_current_organization),
+        db: Session = Depends(get_db)
+):
+    """Get metrics for an Iceberg table"""
+    table = db.query(IcebergTable).filter(
+        IcebergTable.id == table_id,
+        IcebergTable.organization_id == organization_id
     ).first()
-    
+
     if not table:
         raise HTTPException(status_code=404, detail="Table not found")
-    
-    # This would integrate with Unity Catalog lineage APIs
-    # For now, return placeholder lineage information
-    return {
-        "table_id": table_id,
-        "upstream_tables": [],
-        "downstream_tables": [],
-        "transformations": [],
-        "last_updated": datetime.utcnow()
-    }
 
-# Cross-platform compatibility endpoints
-@app.get("/api/v1/tables/{table_id}/query-engines")
-async def get_query_engines(
-    table_id: str,
-    tenant_id: str = Depends(get_tenant_id),
-    db: Session = Depends(get_db)
-):
-    """Get connection information for different query engines"""
-    table = db.query(Table).filter(
-        Table.id == table_id,
-        Table.tenant_id == tenant_id
-    ).first()
-    
-    if not table:
-        raise HTTPException(status_code=404, detail="Table not found")
-    
-    # Return connection info for different platforms
-    return {
-        "table_id": table_id,
-        "platforms": {
-            "databricks": {
-                "connection_string": table.unity_table_name,
-                "query_example": f"SELECT * FROM {table.unity_table_name} LIMIT 10"
-            },
-            "snowflake": {
-                "connection_string": f"iceberg.{tenant_id}.{table.name}",
-                "query_example": f"SELECT * FROM iceberg.{tenant_id}.{table.name} LIMIT 10"
-            },
-            "redshift": {
-                "connection_string": f"iceberg_{tenant_id}_{table.name}",
-                "query_example": f"SELECT * FROM iceberg_{tenant_id}_{table.name} LIMIT 10"
-            },
-            "bigquery": {
-                "connection_string": f"iceberg.{tenant_id}.{table.name}",
-                "query_example": f"SELECT * FROM `iceberg.{tenant_id}.{table.name}` LIMIT 10"
-            },
-            "athena": {
-                "connection_string": f"{tenant_id}_catalog.{table.name}",
-                "query_example": f"SELECT * FROM {tenant_id}_catalog.{table.name} LIMIT 10"
-            }
-        }
-    }
+    iceberg_manager = IcebergManager(organization_id)
+    metrics = await iceberg_manager.get_table_metrics(table.table_location)
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+    return TableMetrics(**metrics)
+
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8001,
+        reload=True,
+        log_level="info"
+    )
