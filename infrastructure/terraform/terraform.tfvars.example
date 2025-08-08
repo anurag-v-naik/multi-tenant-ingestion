@@ -1,0 +1,82 @@
+# Environment Configuration
+environment  = "development"
+aws_region   = "us-east-1"
+project_name = "multi-tenant-ingestion"
+
+# Network Configuration
+vpc_cidr                = "10.0.0.0/16"
+public_subnet_cidrs     = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+private_subnet_cidrs    = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
+database_subnet_cidrs   = ["10.0.21.0/24", "10.0.22.0/24", "10.0.23.0/24"]
+
+# Database Configuration
+db_instance_class       = "db.t3.micro"
+db_allocated_storage    = 20
+db_max_allocated_storage = 100
+db_name                 = "multi_tenant_ingestion"
+db_username             = "postgres"
+db_password             = "change-me-in-production"
+
+# Redis Configuration
+redis_node_type        = "cache.t3.micro"
+redis_num_cache_nodes  = 1
+
+# Databricks Configuration
+databricks_host  = "https://your-workspace.cloud.databricks.com"
+databricks_token = "your-databricks-token"
+
+databricks_tokens = {
+  "finance"    = "dapi-finance-token"
+  "retail"     = "dapi-retail-token"
+  "healthcare" = "dapi-healthcare-token"
+}
+
+databricks_workspaces = {
+  "finance"    = "https://finance.databricks.com"
+  "retail"     = "https://retail.databricks.com"
+  "healthcare" = "https://healthcare.databricks.com"
+}
+
+# Organizations Configuration
+organizations = {
+  "finance" = {
+    name             = "finance"
+    display_name     = "Finance Department"
+    cost_center      = "FIN-001"
+    compliance_level = "high"
+    resource_quotas = {
+      max_dbu_per_hour         = 100
+      max_storage_gb           = 10000
+      max_api_calls_per_minute = 1000
+    }
+  }
+  "retail" = {
+    name             = "retail"
+    display_name     = "Retail Division"
+    cost_center      = "RET-001"
+    compliance_level = "medium"
+    resource_quotas = {
+      max_dbu_per_hour         = 200
+      max_storage_gb           = 50000
+      max_api_calls_per_minute = 2000
+    }
+  }
+  "healthcare" = {
+    name             = "healthcare"
+    display_name     = "Healthcare Division"
+    cost_center      = "HLT-001"
+    compliance_level = "high"
+    resource_quotas = {
+      max_dbu_per_hour         = 150
+      max_storage_gb           = 25000
+      max_api_calls_per_minute = 1500
+    }
+  }
+}
+
+# ECS Configuration
+ecs_cpu           = 256
+ecs_memory        = 512
+ecs_desired_count = 2
+ecs_max_capacity  = 10
+ecs_min_capacity  = 1
