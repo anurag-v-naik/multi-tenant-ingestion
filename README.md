@@ -94,7 +94,7 @@ graph TB
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/your-org/multi-tenant-ingestion-framework.git
+git clone https://github.com/anurag-v-naik/multi-tenant-ingestion.git
 cd multi-tenant-ingestion-framework
 ```
 
