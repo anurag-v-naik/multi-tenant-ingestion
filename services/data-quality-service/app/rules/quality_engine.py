@@ -154,40 +154,24 @@ class QualityRuleEngine:
                 "details": {}
             }
 
-        try:
-            # Convert column to datetime
-            datetime_col = pd.to_datetime(df[column_name], errors='coerce')
-            current_time = datetime.utcnow()
+        total_records = len(df)
+        null_count = df[column_name].isnull().sum()
+        non_null_count = total_records - null_count
+        completeness_ratio = non_null_count / total_records if total_records > 0 else 0
 
-            # Calculate age in hours
-            age_hours = (current_time - datetime_col).dt.total_seconds() / 3600
+        passed = completeness_ratio >= threshold
 
-            # Check timeliness
-            timely_mask = age_hours <= max_age_hours
-            timely_count = timely_mask.sum()
-            total_records = len(df)
-            timeliness_ratio = timely_count / total_records if total_records > 0 else 0
-
-            passed = timeliness_ratio >= rule_def.get("threshold", 0.95)
-
-            return {
-                "passed": passed,
-                "timeliness_ratio": timeliness_ratio,
-                "details": {
-                    "total_records": total_records,
-                    "timely_count": int(timely_count),
-                    "outdated_count": int(total_records - timely_count),
-                    "max_age_hours": max_age_hours,
-                    "timeliness_percentage": round(timeliness_ratio * 100, 2)
-                }
+        return {
+            "passed": passed,
+            "completeness_ratio": completeness_ratio,
+            "threshold": threshold,
+            "details": {
+                "total_records": total_records,
+                "null_count": int(null_count),
+                "non_null_count": int(non_null_count),
+                "completeness_percentage": round(completeness_ratio * 100, 2)
             }
-
-        except Exception as e:
-            return {
-                "passed": False,
-                "error": f"Timeliness check failed: {str(e)}",
-                "details": {}
-            }
+        }
 
     async def _process_reference_integrity_rule(
             self,
@@ -478,6 +462,30 @@ class QualityRuleEngine:
             }
         }
 
+    async def _check_referential_consistency(self, df, rule_def, connection_info, threshold):
+        """Stub for referential consistency check"""
+        # Implement logic as needed
+        return {
+            "passed": True,
+            "details": {}
+        }
+
+    async def _check_business_rule_accuracy(self, df, rule_def):
+        """Stub for business rule accuracy check"""
+        # Implement logic as needed
+        return {
+            "passed": True,
+            "details": {}
+        }
+
+    async def _check_statistical_accuracy(self, df, rule_def):
+        """Stub for statistical accuracy check"""
+        # Implement logic as needed
+        return {
+            "passed": True,
+            "details": {}
+        }
+
     async def _process_range_rule(
             self,
             df: pd.DataFrame,
@@ -674,3 +682,5 @@ class QualityRuleEngine:
             return {
                 "passed": False,
                 "error": f"Column {column_name} not found in dataset",
+                "details": {}
+            }

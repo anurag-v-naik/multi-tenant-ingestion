@@ -433,3 +433,18 @@ class ConfigManager:
         return config_data
 
     def _decrypt_config_data(self, config_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Decrypt sensitive values in configuration data"""
+
+        def decrypt_recursive(obj):
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if isinstance(value, str) and value.startswith("encrypted:"):
+                        obj[key] = self.decrypt_value(value[len("encrypted:"):])
+                    else:
+                        decrypt_recursive(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    decrypt_recursive(item)
+
+        decrypt_recursive(config_data)
+        return config_data
