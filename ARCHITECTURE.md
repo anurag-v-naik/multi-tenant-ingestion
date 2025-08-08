@@ -824,7 +824,7 @@ deployment_strategies:
 ### Disaster Recovery Architecture
 
 ```mermaid
-graph TB
+graph TD
     subgraph "Primary Region (us-east-1)"
         PRIMARY_ECS[ECS Cluster]
         PRIMARY_RDS[RDS Primary]
