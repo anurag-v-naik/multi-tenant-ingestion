@@ -411,6 +411,16 @@ class ConfigManager:
 
         return global_config
 
+    # Add proper secret management:
+    def _get_encryption_key(self) -> bytes:
+        """Get encryption key from AWS Secrets Manager or environment"""
+        try:
+            return os.environ["ENCRYPTION_KEY"].encode()
+        except KeyError:
+            # Fallback to AWS Secrets Manager
+            secret = self.secrets_client.get_secret_value(SecretId="multi-tenant/encryption-key")
+            return secret["SecretString"].encode()
+
     def _encrypt_config_data(self, config_data: Dict[str, Any]) -> Dict[str, Any]:
         """Encrypt sensitive values in configuration data"""
         sensitive_fields = [

@@ -860,19 +860,15 @@ function App() {
 }
 
 // Root App with Providers
-//export default function MultiTenantDataPlatform() {
-//  return (
-//    <AuthProvider>
-//      <App />
-//    </AuthProvider>
-//  );
-//}
-
-// At the bottom, change to:
-export default function App() {
+export default function MultiTenantDataPlatform() {
   return (
     <AuthProvider>
-      <MultiTenantDataPlatform />
+      <App />
     </AuthProvider>
   );
 }
+// This is the entry point for the application
+// It wraps the main App component with the AuthProvider to manage authentication state
+// The ApiClient is used to handle API requests throughout the application
+// The application includes a login form, header, sidebar navigation, and main content area
+// Each page (Dashboard, Pipelines, Connections, Settings) is rendered based on the current

@@ -1,0 +1,7 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pandas==2.1.4
+great-expectations==0.18.12
+sqlalchemy==2.0.23
+pydantic==2.5.0
+structlog==23.2.0
