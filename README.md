@@ -1,104 +1,89 @@
-# 🏗️ Multi-Tenant Data Ingestion Framework
+# Multi-Tenant Data Ingestion Framework
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![Terraform](https://img.shields.io/badge/terraform-1.0+-purple.svg)](https://www.terraform.io/)
-[![Databricks](https://img.shields.io/badge/databricks-enterprise-orange.svg)](https://databricks.com/)
-[![AWS](https://img.shields.io/badge/AWS-cloud-orange.svg)](https://aws.amazon.com/)
+Enterprise-grade multi-tenant data ingestion framework built with Databricks, Unity Catalog, Apache Iceberg, and AWS. Designed for organizations that need secure, scalable, and cost-effective data processing with complete tenant isolation.
 
-A production-ready, enterprise-grade multi-tenant data ingestion framework built with Databricks, Unity Catalog, Apache Iceberg, and AWS. Designed for organizations that need secure, scalable, and cost-effective data processing with complete tenant isolation.
+## 🚀 Features
 
-## 🎯 Key Features
+- 🏢 **Multi-Tenant Architecture**: Complete isolation between organizations with dedicated resources
+- 🔥 **Databricks Integration**: PySpark execution with organization-specific workspaces
+- 📊 **Unity Catalog**: Centralized metadata management with tenant governance
+- 🧊 **Iceberg Tables**: Cross-platform interoperability (Snowflake, Redshift, BigQuery)
+- 🔒 **Enterprise Security**: End-to-end encryption, RBAC, and compliance automation
+- 💰 **Cost Management**: Detailed chargeback, resource quotas, and optimization
+- 🚀 **Auto-Scaling**: Dynamic resource allocation based on workload patterns
+- 📈 **Monitoring**: Comprehensive observability and alerting
 
-- **🏢 Multi-Tenant Architecture**: Complete isolation between organizations with dedicated resources
-- **🔥 Databricks Integration**: PySpark execution with organization-specific workspaces
-- **📊 Unity Catalog**: Centralized metadata management with tenant governance
-- **🧊 Iceberg Tables**: Cross-platform interoperability (Snowflake, Redshift, BigQuery)
-- **🔒 Enterprise Security**: End-to-end encryption, RBAC, and compliance automation
-- **💰 Cost Management**: Detailed chargeback, resource quotas, and optimization
-- **🚀 Auto-Scaling**: Dynamic resource allocation based on workload patterns
-- **📈 Monitoring**: Comprehensive observability and alerting
-
-## 🏗️ Architecture Overview
+## 🏗️ Architecture
 
 ```mermaid
 graph TB
-    subgraph "Multi-Tenant UI Layer"
-        UI[React Multi-Tenant Dashboard]
-        API[API Gateway with Tenant Routing]
-    end
-    
-    subgraph "Microservices Layer"
-        PS[Pipeline Service]
-        CS[Connector Service]
-        DQS[Data Quality Service]
-        CAS[Catalog Service]
-        NS[Notification Service]
-    end
-    
-    subgraph "Processing Layer - Databricks"
-        DB1[Finance Workspace]
-        DB2[Retail Workspace]
-        DB3[Healthcare Workspace]
-    end
-    
-    subgraph "Data Layer"
-        UC[Unity Catalog]
-        ICE[Iceberg Tables]
-        S3A[Finance S3 Bucket]
-        S3B[Retail S3 Bucket]
-        S3C[Healthcare S3 Bucket]
-    end
-    
-    subgraph "Cross-Platform Integration"
-        SF[Snowflake]
-        RS[Redshift]
-        BQ[BigQuery]
-    end
-    
-    UI --> API
-    API --> PS
-    API --> CS
-    API --> DQS
-    API --> CAS
-    
-    PS --> DB1
-    PS --> DB2
-    PS --> DB3
-    
-    DB1 --> UC
-    DB2 --> UC
-    DB3 --> UC
-    
-    UC --> ICE
-    ICE --> S3A
-    ICE --> S3B
-    ICE --> S3C
-    
-    ICE --> SF
-    ICE --> RS
-    ICE --> BQ
+subgraph "Multi-Tenant UI Layer"
+UI[React Multi-Tenant Dashboard]
+API[API Gateway with Tenant Routing]
+end
+subgraph "Microservices Layer"
+PS[Pipeline Service]
+CS[Connector Service]
+DQS[Data Quality Service]
+CAS[Catalog Service]
+NS[Notification Service]
+end
+subgraph "Processing Layer - Databricks"
+DB1[Finance Workspace]
+DB2[Retail Workspace]
+DB3[Healthcare Workspace]
+end
+subgraph "Data Layer"
+UC[Unity Catalog]
+ICE[Iceberg Tables]
+S3A[Finance S3 Bucket]
+S3B[Retail S3 Bucket]
+S3C[Healthcare S3 Bucket]
+end
+subgraph "Cross-Platform Integration"
+SF[Snowflake]
+RS[Redshift]
+BQ[BigQuery]
+end
+UI --> API
+API --> PS
+API --> CS
+API --> DQS
+API --> CAS
+PS --> DB1
+PS --> DB2
+PS --> DB3
+DB1 --> UC
+DB2 --> UC
+DB3 --> UC
+UC --> ICE
+ICE --> S3A
+ICE --> S3B
+ICE --> S3C
+ICE --> SF
+ICE --> RS
+ICE --> BQ
 ```
 
+## 📋 Prerequisites
+
+- AWS Account with administrative access
+- Databricks Account (Premium or Enterprise tier)
+- Terraform >= 1.0
+- Docker >= 20.0
+- Python >= 3.9
+- Node.js >= 16.0
+
 ## 🚀 Quick Start
-
-### Prerequisites
-
-- **AWS Account** with administrative access
-- **Databricks Account** (Premium or Enterprise tier)
-- **Terraform** >= 1.0
-- **Docker** >= 20.0
-- **Python** >= 3.9
-- **Node.js** >= 16.0
 
 ### 1. Clone Repository
 
 ```bash
 git clone https://github.com/anurag-v-naik/multi-tenant-ingestion.git
-cd multi-tenant-ingestion-framework
+cd multi-tenant-ingestion
 ```
 
-### 2. Infrastructure Setup
+### 2. Configure Environment
 
 ```bash
 # Configure AWS credentials
@@ -108,19 +93,27 @@ aws configure
 cp infrastructure/terraform/terraform.tfvars.example infrastructure/terraform/terraform.tfvars
 nano infrastructure/terraform/terraform.tfvars
 
+# Copy and edit environment variables
+cp .env.example .env
+nano .env
+```
+
+### 3. Deploy Infrastructure
+
+```bash
 # Deploy infrastructure
 cd infrastructure/terraform
 terraform init
 terraform plan
 terraform apply -auto-approve
-```
 
-### 3. Application Deployment
-
-```bash
 # Return to root directory
 cd ../../
+```
 
+### 4. Deploy Services
+
+```bash
 # Build and deploy services
 ./deployment/scripts/deploy.sh --build-images --deploy-services
 
@@ -130,60 +123,61 @@ cd ../../
 ./deployment/scripts/setup-organization.sh healthcare
 ```
 
-### 4. Verify Deployment
+### 5. Verify Deployment
 
 ```bash
 # Check service health
-curl https://$(terraform output -raw load_balancer_dns)/health
+curl https://$(terraform -chdir=infrastructure/terraform output -raw load_balancer_dns)/health
 
 # Access the UI
-open https://$(terraform output -raw load_balancer_dns)
+open https://$(terraform -chdir=infrastructure/terraform output -raw load_balancer_dns)
 ```
 
-## 📁 Repository Structure
+## 📁 Project Structure
 
 ```
 multi-tenant-ingestion-framework/
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml                     # Continuous Integration
-│       ├── cd.yml                     # Continuous Deployment
-│       └── security-scan.yml          # Security scanning
+│       ├── ci.yml                    # Continuous Integration
+│       ├── cd.yml                    # Continuous Deployment
+│       └── security-scan.yml         # Security scanning
 ├── docs/
-│   ├── ARCHITECTURE.md                # Detailed architecture guide
-│   ├── DEPLOYMENT.md                  # Deployment guide
-│   ├── API_REFERENCE.md               # API documentation
-│   ├── USER_GUIDE.md                  # End-user guide
-│   └── CONTRIBUTING.md                # Contribution guidelines
+│   ├── ARCHITECTURE.md               # Detailed architecture guide
+│   ├── DEPLOYMENT.md                 # Deployment guide
+│   ├── API_REFERENCE.md              # API documentation
+│   ├── USER_GUIDE.md                 # End-user guide
+│   └── CONTRIBUTING.md               # Contribution guidelines
 ├── infrastructure/
 │   ├── terraform/
-│   │   ├── main.tf                    # Complete AWS infrastructure
-│   │   ├── variables.tf               # Configuration variables
-│   │   ├── outputs.tf                 # Infrastructure outputs
-│   │   └── terraform.tfvars.example   # Example configuration
+│   │   ├── main.tf                   # Complete AWS infrastructure
+│   │   ├── iam.tf                    # IAM roles and policies
+│   │   ├── variables.tf              # Configuration variables
+│   │   ├── outputs.tf                # Infrastructure outputs
+│   │   └── terraform.tfvars.example  # Example configuration
 │   ├── kubernetes/
-│   │   ├── namespaces/                # Organization namespaces
-│   │   ├── ingress/                   # Multi-tenant ingress
-│   │   └── monitoring/                # Observability stack
+│   │   ├── namespaces/               # Organization namespaces
+│   │   ├── ingress/                  # Multi-tenant ingress
+│   │   └── monitoring/               # Observability stack
 │   └── databricks/
-│       ├── workspace-config.py        # Workspace automation
-│       └── unity-catalog-setup.sql    # Catalog initialization
+│       ├── workspace-config.py       # Workspace automation
+│       └── unity-catalog-setup.sql   # Catalog initialization
 ├── services/
 │   ├── pipeline-service/
 │   │   ├── Dockerfile
 │   │   ├── requirements.txt
 │   │   ├── app/
-│   │   │   ├── main.py                # FastAPI application
-│   │   │   ├── models/                # Database models
-│   │   │   ├── api/                   # API endpoints
-│   │   │   └── core/                  # Business logic
+│   │   │   ├── main.py               # FastAPI application
+│   │   │   ├── models/               # Database models
+│   │   │   ├── api/                  # API endpoints
+│   │   │   └── core/                 # Business logic
 │   │   └── notebooks/
-│   │       └── pyspark_template.py    # Databricks notebook template
+│   │       └── pyspark_template.py   # Databricks notebook template
 │   ├── catalog-service/
 │   │   ├── Dockerfile
 │   │   ├── requirements.txt
 │   │   └── app/
-│   │       ├── main.py                # Unity Catalog & Iceberg service
+│   │       ├── main.py               # Unity Catalog & Iceberg service
 │   │       ├── models/
 │   │       ├── api/
 │   │       └── core/
@@ -191,55 +185,55 @@ multi-tenant-ingestion-framework/
 │   │   ├── Dockerfile
 │   │   ├── requirements.txt
 │   │   └── app/
-│   │       ├── main.py                # Connector registry
-│   │       ├── connectors/            # Built-in connectors
-│   │       └── templates/             # Connector templates
+│   │       ├── main.py               # Connector registry
+│   │       ├── connectors/           # Built-in connectors
+│   │       └── templates/            # Connector templates
 │   ├── data-quality-service/
 │   │   ├── Dockerfile
 │   │   ├── requirements.txt
 │   │   └── app/
-│   │       ├── main.py                # DQ validation service
-│   │       ├── rules/                 # Quality rules engine
-│   │       └── reports/               # DQ reporting
+│   │       ├── main.py               # DQ validation service
+│   │       ├── rules/                # Quality rules engine
+│   │       └── reports/              # DQ reporting
 │   └── ui/
 │       ├── Dockerfile
 │       ├── package.json
 │       ├── src/
-│       │   ├── components/            # React components
-│       │   ├── pages/                 # Application pages
-│       │   ├── hooks/                 # Custom hooks
-│       │   └── utils/                 # Utility functions
+│       │   ├── components/           # React components
+│       │   ├── pages/                # Application pages
+│       │   ├── hooks/                # Custom hooks
+│       │   └── utils/                # Utility functions
 │       └── public/
 ├── deployment/
-│   ├── docker-compose.yml             # Local development
-│   ├── helm-charts/                   # Kubernetes deployment
+│   ├── docker-compose.yml            # Local development
+│   ├── helm-charts/                  # Kubernetes deployment
 │   │   ├── multi-tenant-ingestion/
 │   │   └── monitoring/
 │   ├── scripts/
-│   │   ├── deploy.sh                  # Main deployment script
-│   │   ├── setup-organization.sh      # Organization setup
-│   │   ├── backup.sh                  # Backup automation
-│   │   └── rollback.sh                # Rollback procedures
+│   │   ├── deploy.sh                 # Main deployment script
+│   │   ├── setup-organization.sh     # Organization setup
+│   │   ├── backup.sh                 # Backup automation
+│   │   └── rollback.sh               # Rollback procedures
 │   └── configs/
-│       ├── production.env             # Production configuration
-│       ├── staging.env                # Staging configuration
-│       └── development.env            # Development configuration
+│       ├── production.env            # Production configuration
+│       ├── staging.env               # Staging configuration
+│       └── development.env           # Development configuration
 ├── examples/
-│   ├── pipeline-configs/              # Sample pipeline configurations
-│   ├── connectors/                    # Custom connector examples
-│   ├── notebooks/                     # Sample Databricks notebooks
-│   └── data-quality-rules/            # DQ rule examples
+│   ├── pipeline-configs/             # Sample pipeline configurations
+│   ├── connectors/                   # Custom connector examples
+│   ├── notebooks/                    # Sample Databricks notebooks
+│   └── data-quality-rules/           # DQ rule examples
 ├── tests/
-│   ├── unit/                          # Unit tests
-│   ├── integration/                   # Integration tests
-│   ├── load/                          # Performance tests
-│   └── fixtures/                      # Test data
+│   ├── unit/                         # Unit tests
+│   ├── integration/                  # Integration tests
+│   ├── load/                         # Performance tests
+│   └── fixtures/                     # Test data
 ├── scripts/
-│   ├── setup-dev-environment.sh       # Development setup
-│   ├── generate-test-data.py          # Test data generation
-│   └── migrate-organization.py        # Organization migration
-├── .env.example                       # Environment variables template
-├── .gitignore                         # Git ignore rules
+│   ├── setup-dev-environment.sh     # Development setup
+│   ├── generate-test-data.py         # Test data generation
+│   └── migrate-organization.py       # Organization migration
+├── .env.example                      # Environment variables template
+├── .gitignore                        # Git ignore rules
 ├── .pre-commit-config.yaml           # Pre-commit hooks
 ├── docker-compose.yml                # Local development stack
 ├── LICENSE                           # MIT License
@@ -249,7 +243,7 @@ multi-tenant-ingestion-framework/
 └── README.md                         # This file
 ```
 
-## 🔧 Configuration
+## ⚙️ Configuration
 
 ### Environment Variables
 
@@ -278,39 +272,41 @@ ICEBERG_ENABLED=true
 MULTI_TENANT_MODE=true
 ```
 
-### Organization Configuration
+### Terraform Variables
 
-```yaml
+Configure `infrastructure/terraform/terraform.tfvars`:
+
+```hcl
 # terraform.tfvars
 organizations = {
   "finance" = {
-    name             = "finance"
-    display_name     = "Finance Department"
-    cost_center      = "FIN-001"
+    name = "finance"
+    display_name = "Finance Department"
+    cost_center = "FIN-001"
     compliance_level = "high"
     resource_quotas = {
-      max_dbu_per_hour         = 100
-      max_storage_gb           = 10000
+      max_dbu_per_hour = 100
+      max_storage_gb = 10000
       max_api_calls_per_minute = 1000
     }
   }
   "retail" = {
-    name             = "retail"
-    display_name     = "Retail Division"
-    cost_center      = "RET-001"
+    name = "retail"
+    display_name = "Retail Division"
+    cost_center = "RET-001"
     compliance_level = "medium"
     resource_quotas = {
-      max_dbu_per_hour         = 200
-      max_storage_gb           = 50000
+      max_dbu_per_hour = 200
+      max_storage_gb = 50000
       max_api_calls_per_minute = 2000
     }
   }
 }
 ```
 
-## 🐳 Local Development
+## 🛠️ Development
 
-### Using Docker Compose
+### Local Development
 
 ```bash
 # Start all services locally
@@ -323,7 +319,7 @@ docker-compose logs -f
 docker-compose down
 ```
 
-### Using Make Commands
+### Development Commands
 
 ```bash
 # Setup development environment
@@ -344,7 +340,7 @@ make deploy-local
 
 ## 🧪 Testing
 
-### Run All Tests
+### Run Tests
 
 ```bash
 # Unit tests
@@ -360,7 +356,7 @@ pytest tests/load/ -v
 pytest --cov=services/ --cov-report=html
 ```
 
-### Specific Test Categories
+### Test Multi-Tenant Isolation
 
 ```bash
 # Test multi-tenant isolation
@@ -376,7 +372,7 @@ pytest tests/integration/test_unity_catalog.py -v
 pytest tests/integration/test_iceberg.py -v
 ```
 
-## 📊 Monitoring & Observability
+## 📊 Monitoring
 
 ### Health Checks
 
@@ -394,16 +390,16 @@ curl http://localhost:8000/health/databricks
 curl http://localhost:8000/health/unity-catalog
 ```
 
-### Metrics & Dashboards
+### Dashboards
 
-- **Grafana Dashboard**: `http://localhost:3000`
-- **Prometheus Metrics**: `http://localhost:9090`
+- **Grafana Dashboard**: http://localhost:3000
+- **Prometheus Metrics**: http://localhost:9090
 - **CloudWatch Dashboard**: Available in AWS Console
 - **Application Logs**: Available in CloudWatch Logs
 
 ## 🔐 Security
 
-### Authentication & Authorization
+### Authentication
 
 ```bash
 # Generate JWT token for testing
@@ -413,8 +409,8 @@ curl -X POST http://localhost:8000/auth/login \
 
 # Use token in API calls
 curl -H "Authorization: Bearer $JWT_TOKEN" \
-     -H "X-Organization-ID: finance" \
-     http://localhost:8000/api/v1/pipelines
+  -H "X-Organization-ID: finance" \
+  http://localhost:8000/api/v1/pipelines
 ```
 
 ### Secrets Management
@@ -474,24 +470,36 @@ aws secretsmanager create-secret \
 
 ## 📚 Documentation
 
-- [Architecture Guide](docs/ARCHITECTURE.md) - Detailed system architecture
-- [Deployment Guide](docs/DEPLOYMENT.md) - Step-by-step deployment instructions
-- [API Reference](docs/API_REFERENCE.md) - Complete API documentation
-- [User Guide](docs/USER_GUIDE.md) - End-user documentation
-- [Contributing Guide](docs/CONTRIBUTING.md) - How to contribute
+- **[Architecture Guide](docs/ARCHITECTURE.md)** - Detailed system architecture
+- **[Deployment Guide](docs/DEPLOYMENT.md)** - Step-by-step deployment instructions  
+- **[API Reference](docs/API_REFERENCE.md)** - Complete API documentation
+- **[User Guide](docs/USER_GUIDE.md)** - End-user documentation
+- **[Contributing Guide](docs/CONTRIBUTING.md)** - How to contribute
 
 ## 🤝 Contributing
 
 We welcome contributions! Please see our [Contributing Guide](docs/CONTRIBUTING.md) for details.
 
-### Development Workflow
+### Quick Contribution Steps
 
 1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/amazing-feature`
+2. Create a feature branch:
+   ```bash
+   git checkout -b feature/amazing-feature
+   ```
 3. Make your changes and add tests
-4. Run the test suite: `make test`
-5. Commit your changes: `git commit -m 'Add amazing feature'`
-6. Push to the branch: `git push origin feature/amazing-feature`
+4. Run the test suite:
+   ```bash
+   make test
+   ```
+5. Commit your changes:
+   ```bash
+   git commit -m 'Add amazing feature'
+   ```
+6. Push to the branch:
+   ```bash
+   git push origin feature/amazing-feature
+   ```
 7. Submit a Pull Request
 
 ## 📄 License
@@ -500,10 +508,10 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🆘 Support
 
-- **Issues**: [GitHub Issues](https://github.com/your-org/multi-tenant-ingestion-framework/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-org/multi-tenant-ingestion-framework/discussions)
+- **Issues**: [GitHub Issues](https://github.com/anurag-v-naik/multi-tenant-ingestion/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/anurag-v-naik/multi-tenant-ingestion/discussions)
 - **Documentation**: [docs/](docs/)
-- **Email**: data-engineering@yourcompany.com
+- **Email**: [data-engineering@yourcompany.com](mailto:data-engineering@yourcompany.com)
 
 ## 🏷️ Tags
 
@@ -511,6 +519,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-⭐ **Star this repository** if you find it helpful!
+⭐ **Star this repository if you find it helpful!**
 
-**Built with ❤️ by the Data Engineering Team**
+Built with ❤️ by the Data Engineering Team

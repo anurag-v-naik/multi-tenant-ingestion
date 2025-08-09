@@ -1,1099 +1,669 @@
-# 🏗️ Multi-Tenant Data Ingestion Framework - Architecture Guide
+# Multi-Tenant Data Ingestion Framework - Architecture Guide
 
 ## Table of Contents
+1. [Architecture Overview](#architecture-overview)
+2. [Multi-Tenant Design Principles](#multi-tenant-design-principles)
+3. [System Components](#system-components)
+4. [Data Flow Architecture](#data-flow-architecture)
+5. [Security Architecture](#security-architecture)
+6. [Tenant Isolation Strategy](#tenant-isolation-strategy)
+7. [Scalability and Performance](#scalability-and-performance)
+8. [Infrastructure Architecture](#infrastructure-architecture)
+9. [Integration Architecture](#integration-architecture)
+10. [Monitoring and Observability](#monitoring-and-observability)
 
-- [Overview](#overview)
-- [Architecture Principles](#architecture-principles)
-- [System Components](#system-components)
-- [Multi-Tenancy Design](#multi-tenancy-design)
-- [Data Flow Architecture](#data-flow-architecture)
-- [Security Architecture](#security-architecture)
-- [Scalability & Performance](#scalability--performance)
-- [Cost Management Architecture](#cost-management-architecture)
-- [Technology Stack](#technology-stack)
-- [Deployment Architecture](#deployment-architecture)
+## Architecture Overview
 
-## Overview
+The Multi-Tenant Data Ingestion Framework is designed as a cloud-native, microservices-based platform that provides secure, scalable, and cost-effective data processing capabilities for multiple organizations within a single deployment.
 
-The Multi-Tenant Data Ingestion Framework is designed as a cloud-native, microservices-based platform that provides secure, scalable, and cost-effective data processing capabilities for multiple organizations within an enterprise. The architecture ensures complete tenant isolation while maximizing resource efficiency and enabling cross-platform data interoperability.
+### Core Design Goals
 
-## Architecture Principles
+- **Complete Tenant Isolation**: Physical and logical separation of tenant data and resources
+- **Enterprise Security**: End-to-end encryption, RBAC, and compliance automation
+- **Elastic Scalability**: Dynamic resource allocation based on workload patterns
+- **Cost Optimization**: Detailed chargeback, resource quotas, and optimization
+- **Cross-Platform Compatibility**: Support for multiple data platforms and formats
 
-### 1. **Multi-Tenancy First**
-- Complete isolation between organizations
-- Shared infrastructure with logical separation
-- Organization-specific resource quotas and policies
+### High-Level Architecture Diagram
 
-### 2. **Cloud-Native Design**
-- Container-first approach with Docker and Kubernetes
-- Serverless compute with AWS Fargate and Databricks
-- Auto-scaling based on demand
+```mermaid
+graph TB
+    subgraph "Client Layer"
+        UI[Multi-Tenant Dashboard]
+        API_GW[API Gateway]
+        CLI[CLI Tools]
+    end
+    
+    subgraph "Application Layer"
+        AUTH[Authentication Service]
+        PIPELINE[Pipeline Service]
+        CATALOG[Catalog Service]
+        CONNECTOR[Connector Service]
+        DQ[Data Quality Service]
+        NOTIFY[Notification Service]
+    end
+    
+    subgraph "Processing Layer"
+        DB_FINANCE[Finance Databricks Workspace]
+        DB_RETAIL[Retail Databricks Workspace]
+        DB_HEALTH[Healthcare Databricks Workspace]
+    end
+    
+    subgraph "Data Layer"
+        UC[Unity Catalog]
+        ICEBERG[Iceberg Tables]
+        S3_FINANCE[Finance S3 Bucket]
+        S3_RETAIL[Retail S3 Bucket]
+        S3_HEALTH[Healthcare S3 Bucket]
+    end
+    
+    subgraph "Infrastructure Layer"
+        EKS[EKS Cluster]
+        RDS[PostgreSQL Database]
+        REDIS[Redis Cache]
+        SECRETS[AWS Secrets Manager]
+    end
+    
+    UI --> API_GW
+    CLI --> API_GW
+    API_GW --> AUTH
+    AUTH --> PIPELINE
+    AUTH --> CATALOG
+    AUTH --> CONNECTOR
+    PIPELINE --> DB_FINANCE
+    PIPELINE --> DB_RETAIL
+    PIPELINE --> DB_HEALTH
+    DB_FINANCE --> UC
+    DB_RETAIL --> UC
+    DB_HEALTH --> UC
+    UC --> ICEBERG
+    ICEBERG --> S3_FINANCE
+    ICEBERG --> S3_RETAIL
+    ICEBERG --> S3_HEALTH
+```
 
-### 3. **Security by Design**
-- Zero-trust architecture
-- End-to-end encryption
-- Role-based access control (RBAC)
-- Audit logging and compliance automation
+## Multi-Tenant Design Principles
 
-### 4. **Microservices Architecture**
-- Domain-driven service boundaries
-- API-first communication
-- Independent deployment and scaling
+### 1. Tenant Isolation Models
 
-### 5. **Data Platform Agnostic**
-- Support for multiple data platforms (Databricks, Snowflake, Redshift)
-- Apache Iceberg for cross-platform table format
-- Unity Catalog for unified metadata management
+The framework implements a **hybrid multi-tenancy model** combining multiple isolation strategies:
+
+#### Database Level Isolation
+- **Shared Infrastructure**: Common Kubernetes cluster and base services
+- **Isolated Data Stores**: Separate S3 buckets per tenant
+- **Isolated Processing**: Dedicated Databricks workspaces per tenant
+- **Shared Metadata**: Centralized Unity Catalog with tenant-scoped access
+
+#### Application Level Isolation
+- **Tenant Context**: All requests include tenant identification
+- **Resource Quotas**: Per-tenant limits on compute, storage, and API calls
+- **Configuration Isolation**: Tenant-specific settings and policies
+
+### 2. Security by Design
+
+#### Zero Trust Architecture
+- Every request is authenticated and authorized
+- No implicit trust between components
+- Network segmentation and micro-perimeters
+- Continuous verification of trust
+
+#### Defense in Depth
+- Multiple layers of security controls
+- Encryption at rest and in transit
+- Network isolation and firewalls
+- Application-level security
+
+### 3. Data Governance Principles
+
+#### Data Lineage and Cataloging
+- Comprehensive metadata management via Unity Catalog
+- Automated data discovery and classification
+- End-to-end data lineage tracking
+
+#### Compliance and Auditability
+- Complete audit trails for all data operations
+- Compliance framework support (SOX, GDPR, HIPAA)
+- Automated policy enforcement
 
 ## System Components
 
-### Presentation Layer
+### Core Services Architecture
 
-```mermaid
-graph TB
-    subgraph "Presentation Layer"
-        WUI[Web UI - React SPA]
-        API[API Gateway]
-        CLI[CLI Tools]
-        SDK[Python SDK]
-    end
-    
-    subgraph "Features"
-        WUI --> F1[Multi-tenant Dashboard]
-        WUI --> F2[Pipeline Builder]
-        WUI --> F3[Data Quality Monitor]
-        WUI --> F4[Cost Analytics]
-    end
-```
+#### 1. Pipeline Service
+**Purpose**: Manages the lifecycle of data ingestion pipelines
 
-#### **Web UI (React SPA)**
-- **Multi-tenant dashboard** with organization-specific views
-- **Pipeline builder** with drag-and-drop interface
-- **Data quality monitoring** with real-time metrics
-- **Cost analytics** with chargeback reports
-- **Role-based access control** with fine-grained permissions
+**Key Features**:
+- Pipeline creation, modification, and deletion
+- Scheduling and execution management
+- Databricks job orchestration
+- Error handling and retry mechanisms
+- Performance monitoring and optimization
 
-#### **API Gateway**
-- **Organization routing** based on headers/tokens
-- **Rate limiting** per organization
-- **Authentication & authorization** with JWT
-- **Request/response transformation**
-- **API versioning** and backward compatibility
+**Technology Stack**:
+- FastAPI for REST API
+- SQLAlchemy for database ORM
+- Celery for background tasks
+- Pydantic for data validation
 
-### Application Layer
+**Deployment**: Kubernetes deployment with auto-scaling
 
-```mermaid
-graph TB
-    subgraph "Microservices"
-        PS[Pipeline Service]
-        CS[Connector Service]
-        DQS[Data Quality Service]
-        CAS[Catalog Service]
-        NS[Notification Service]
-        MS[Monitoring Service]
-    end
-    
-    subgraph "Core Capabilities"
-        PS --> PC[Pipeline Orchestration]
-        CS --> CC[Connector Registry]
-        DQS --> DQ[Quality Validation]
-        CAS --> CM[Metadata Management]
-        NS --> NM[Alert Management]
-        MS --> MC[Observability]
-    end
-```
+#### 2. Catalog Service
+**Purpose**: Manages metadata and data catalog operations
 
-#### **Pipeline Service**
-- **Databricks job orchestration** with organization-specific workspaces
-- **PySpark notebook generation** from pipeline configurations
-- **Execution monitoring** and status tracking
-- **Resource quota enforcement**
-- **Cost tracking** per pipeline execution
+**Key Features**:
+- Unity Catalog integration
+- Iceberg table management
+- Schema evolution and versioning
+- Cross-platform metadata synchronization
+- Data discovery and search
 
-#### **Connector Service**
-- **Multi-platform connector registry** (50+ built-in connectors)
-- **Custom connector support** with validation
-- **Connection testing** and health monitoring
-- **Configuration templates** for rapid setup
-- **Version management** and rollback capabilities
+**Integration Points**:
+- Unity Catalog REST API
+- Apache Iceberg metadata
+- Databricks SQL endpoints
+- External data platforms (Snowflake, Redshift, BigQuery)
 
-#### **Data Quality Service**
-- **Rule-based validation engine** with extensible rules
-- **Real-time quality monitoring** during pipeline execution
-- **Quality score calculation** and trending
-- **Automated alerting** on quality threshold breaches
-- **Compliance reporting** for regulatory requirements
+#### 3. Connector Service
+**Purpose**: Manages data source and destination connectors
 
-#### **Catalog Service**
-- **Unity Catalog integration** for metadata management
-- **Iceberg table creation** and management
-- **Data lineage tracking** across pipelines
-- **Cross-platform table synchronization**
-- **Schema evolution** and versioning
+**Key Features**:
+- Connector registry and management
+- Configuration templates
+- Connection testing and validation
+- Custom connector development framework
+- Protocol abstraction layer
 
-### Processing Layer
+**Supported Connectors**:
+- Database connectors (PostgreSQL, MySQL, Oracle, SQL Server)
+- Cloud storage (S3, GCS, Azure Blob)
+- Message queues (Kafka, RabbitMQ, SQS)
+- APIs (REST, GraphQL, SOAP)
+- File formats (CSV, JSON, Parquet, Avro)
 
-```mermaid
-graph TB
-    subgraph "Databricks Multi-Tenant Processing"
-        DW1[Finance Workspace]
-        DW2[Retail Workspace]
-        DW3[Healthcare Workspace]
-    end
-    
-    subgraph "Processing Features"
-        DW1 --> PF1[Auto-scaling Clusters]
-        DW1 --> PF2[Cost Attribution]
-        DW1 --> PF3[Security Isolation]
-        DW1 --> PF4[Performance Optimization]
-    end
-    
-    subgraph "Storage Layer"
-        DL[Delta Lake]
-        IT[Iceberg Tables]
-        UC[Unity Catalog]
-    end
-    
-    DW1 --> DL
-    DW2 --> DL
-    DW3 --> DL
-    DL --> IT
-    IT --> UC
-```
+#### 4. Data Quality Service
+**Purpose**: Validates and monitors data quality
 
-#### **Databricks Workspaces**
-- **Organization-specific workspaces** with isolated compute
-- **Auto-scaling clusters** with resource quotas
-- **Spot instance integration** for cost optimization
-- **Custom cluster policies** per organization
-- **Performance monitoring** and optimization
+**Key Features**:
+- Rule-based quality validation
+- Statistical profiling
+- Anomaly detection
+- Data quality scoring
+- Automated remediation workflows
 
-#### **PySpark Execution Engine**
-- **Dynamic notebook generation** from pipeline templates
-- **Multi-format data support** (Delta, Parquet, JSON, CSV)
-- **Advanced transformations** with custom UDFs
-- **Streaming and batch processing** capabilities
-- **Integration with external systems** (Kafka, databases, APIs)
+**Quality Checks**:
+- Schema validation
+- Data type validation
+- Range and format checks
+- Completeness analysis
+- Duplicate detection
+- Cross-field validation
 
-### Data Layer
+#### 5. Notification Service
+**Purpose**: Handles alerts and notifications
 
-```mermaid
-graph TB
-    subgraph "Data Storage"
-        S3A[Finance S3 Bucket]
-        S3B[Retail S3 Bucket]
-        S3C[Healthcare S3 Bucket]
-    end
-    
-    subgraph "Metadata & Catalog"
-        UC[Unity Catalog]
-        ICE[Iceberg Tables]
-        DL[Delta Lake]
-    end
-    
-    subgraph "Cross-Platform Integration"
-        SF[Snowflake]
-        RS[Redshift]
-        BQ[BigQuery]
-    end
-    
-    S3A --> UC
-    S3B --> UC
-    S3C --> UC
-    UC --> ICE
-    ICE --> DL
-    ICE --> SF
-    ICE --> RS
-    ICE --> BQ
-```
+**Key Features**:
+- Multi-channel notifications (email, Slack, webhooks)
+- Event-driven messaging
+- Template management
+- Escalation policies
+- Audit trail
 
-#### **Unity Catalog**
-- **Centralized metadata management** across all organizations
-- **Fine-grained access control** at table/column level
-- **Data governance** with automated policy enforcement
-- **Data discovery** and search capabilities
-- **Audit logging** for compliance
+### Infrastructure Components
 
-#### **Apache Iceberg Integration**
-- **Cross-platform table format** for interoperability
-- **ACID transactions** with time travel capabilities
-- **Schema evolution** without breaking changes
-- **Partition evolution** for performance optimization
-- **Multi-engine support** (Spark, Trino, Flink)
+#### Kubernetes Cluster (EKS)
+- **Multi-tenant namespace isolation**
+- **Resource quotas and limits**
+- **Network policies for micro-segmentation**
+- **Auto-scaling based on workload**
+- **Rolling deployments with zero downtime**
 
-## Multi-Tenancy Design
+#### Data Storage
+- **S3 Buckets**: Tenant-isolated data storage with encryption
+- **PostgreSQL**: Application metadata and configuration
+- **Redis**: Session management and caching
+- **Unity Catalog**: Centralized metadata management
 
-### Tenant Isolation Strategies
-
-```mermaid
-graph TB
-    subgraph "Physical Isolation"
-        PI1[Separate S3 Buckets]
-        PI2[Dedicated Databricks Workspaces]
-        PI3[Organization-specific KMS Keys]
-    end
-    
-    subgraph "Logical Isolation"
-        LI1[Database Schema Separation]
-        LI2[Unity Catalog Namespaces]
-        LI3[API Tenant Context]
-    end
-    
-    subgraph "Network Isolation"
-        NI1[VPC Security Groups]
-        NI2[Private Subnets]
-        NI3[Network ACLs]
-    end
-```
-
-#### **Resource Isolation**
-
-| Component | Isolation Method | Benefits |
-|-----------|------------------|----------|
-| **Compute** | Dedicated Databricks workspaces | Complete compute isolation, custom policies |
-| **Storage** | Separate S3 buckets with encryption | Data isolation, compliance, cost tracking |
-| **Metadata** | Unity Catalog schemas | Logical separation, access control |
-| **Secrets** | Organization-scoped secrets | Security isolation, key management |
-| **Networks** | Security groups, NACLs | Network-level isolation |
-
-#### **Cost Allocation**
-
-```yaml
-cost_allocation:
-  dimensions:
-    - organization_id
-    - cost_center
-    - environment
-    - service_type
-  
-  tracking:
-    compute:
-      - databricks_dbu_consumption
-      - ecs_task_hours
-      - lambda_invocations
-    storage:
-      - s3_storage_gb
-      - s3_requests
-      - backup_storage
-    network:
-      - data_transfer_out
-      - vpc_endpoint_hours
-      - nat_gateway_hours
-    platform:
-      - api_requests
-      - secrets_manager_calls
-      - cloudwatch_metrics
-```
+#### Security Infrastructure
+- **AWS IAM**: Role-based access control
+- **Secrets Manager**: Secure credential storage
+- **Certificate Manager**: TLS certificate management
+- **CloudTrail**: Audit logging
+- **GuardDuty**: Threat detection
 
 ## Data Flow Architecture
 
-### Pipeline Execution Flow
+### Ingestion Flow
 
 ```mermaid
-sequenceDiagram
-    participant UI as Web UI
-    participant API as API Gateway
-    participant PS as Pipeline Service
-    participant DB as Databricks
-    participant UC as Unity Catalog
-    participant S3 as S3 Storage
-    participant DQ as Data Quality
-    participant NS as Notification
-
-    UI->>API: Create Pipeline Request
-    API->>PS: Route to Pipeline Service
-    PS->>DB: Create Databricks Job
-    PS->>UC: Register Metadata
-    
-    Note over DB: Pipeline Execution
-    DB->>S3: Extract Source Data
-    DB->>DB: Apply Transformations
-    DB->>DQ: Run Quality Checks
-    
-    alt Quality Checks Pass
-        DB->>S3: Store Processed Data
-        DB->>UC: Update Table Metadata
-        PS->>NS: Send Success Notification
-    else Quality Checks Fail
-        PS->>NS: Send Failure Alert
+graph LR
+    subgraph "Source Systems"
+        DB[(Database)]
+        API[REST API]
+        FILE[File System]
+        STREAM[Streaming]
     end
     
-    PS->>UI: Update Pipeline Status
+    subgraph "Ingestion Layer"
+        CONNECTOR[Connector Service]
+        VALIDATE[Data Quality Service]
+    end
+    
+    subgraph "Processing Layer"
+        DATABRICKS[Databricks Workspace]
+        SPARK[PySpark Jobs]
+    end
+    
+    subgraph "Storage Layer"
+        S3[S3 Raw Data]
+        ICEBERG[Iceberg Tables]
+        CATALOG[Unity Catalog]
+    end
+    
+    subgraph "Consumption Layer"
+        SNOWFLAKE[Snowflake]
+        REDSHIFT[Redshift]
+        BIGQUERY[BigQuery]
+        BI[BI Tools]
+    end
+    
+    DB --> CONNECTOR
+    API --> CONNECTOR
+    FILE --> CONNECTOR
+    STREAM --> CONNECTOR
+    CONNECTOR --> VALIDATE
+    VALIDATE --> DATABRICKS
+    DATABRICKS --> SPARK
+    SPARK --> S3
+    SPARK --> ICEBERG
+    ICEBERG --> CATALOG
+    ICEBERG --> SNOWFLAKE
+    ICEBERG --> REDSHIFT
+    ICEBERG --> BIGQUERY
+    ICEBERG --> BI
 ```
 
 ### Data Processing Patterns
 
-#### **Batch Processing**
-```python
-# Example batch pipeline configuration
-{
-  "pipeline_type": "batch",
-  "schedule": "0 2 * * *",  # Daily at 2 AM
-  "source": {
-    "type": "mysql",
-    "connection": "finance-db",
-    "table": "transactions",
-    "incremental_column": "updated_at"
-  },
-  "transformations": [
-    {
-      "type": "filter",
-      "condition": "amount > 0"
-    },
-    {
-      "type": "aggregate",
-      "group_by": ["customer_id", "date"],
-      "aggregations": {
-        "amount": "sum",
-        "count": "count"
-      }
-    }
-  ],
-  "target": {
-    "type": "iceberg",
-    "catalog": "finance_catalog",
-    "schema": "analytics",
-    "table": "daily_transactions"
-  },
-  "data_quality": [
-    {
-      "type": "completeness",
-      "columns": ["customer_id", "amount"],
-      "threshold": 0.95
-    }
-  ]
-}
-```
+#### Batch Processing
+- **Schedule-based execution**: Cron-like scheduling with timezone support
+- **Event-driven triggers**: Process data when files arrive or events occur
+- **Dependency management**: Complex workflow orchestration
+- **Retry mechanisms**: Automatic retry with exponential backoff
 
-#### **Stream Processing**
-```python
-# Example streaming pipeline configuration
-{
-  "pipeline_type": "streaming",
-  "source": {
-    "type": "kafka",
-    "bootstrap_servers": "kafka-cluster:9092",
-    "topic": "user-events",
-    "consumer_group": "finance-analytics"
-  },
-  "transformations": [
-    {
-      "type": "window",
-      "window_type": "tumbling",
-      "duration": "5 minutes"
-    },
-    {
-      "type": "aggregate",
-      "group_by": ["user_id", "event_type"],
-      "aggregations": {
-        "count": "count",
-        "avg_value": "avg"
-      }
-    }
-  ],
-  "target": {
-    "type": "delta",
-    "path": "s3://finance-data-lake/streaming/user-events",
-    "mode": "append",
-    "output_mode": "update"
-  }
-}
-```
+#### Stream Processing
+- **Real-time ingestion**: Kafka/Kinesis integration
+- **Micro-batch processing**: Small batch processing for near real-time
+- **Event streaming**: Event-driven architecture with CDC support
+- **Back-pressure handling**: Dynamic scaling based on processing lag
+
+#### Data Transformation
+- **Schema evolution**: Automatic handling of schema changes
+- **Data type conversion**: Intelligent type casting and validation
+- **Data enrichment**: Lookup and join operations
+- **Aggregation and summarization**: Pre-computed metrics and KPIs
 
 ## Security Architecture
 
-### Zero-Trust Security Model
+### Authentication and Authorization
+
+#### Multi-Tenant Authentication Flow
 
 ```mermaid
-graph TB
-    subgraph "Identity & Access"
-        IAM[AWS IAM]
-        SSO[Organization SSO]
-        RBAC[Role-Based Access]
-        MFA[Multi-Factor Auth]
-    end
+sequenceDiagram
+    participant U as User
+    participant API as API Gateway
+    participant AUTH as Auth Service
+    participant JWT as JWT Token
+    participant TENANT as Tenant Service
+    participant RESOURCE as Protected Resource
     
-    subgraph "Data Protection"
-        KMS[AWS KMS]
-        SM[Secrets Manager]
-        TLS[TLS Encryption]
-        AES[AES-256 Encryption]
-    end
+    U->>API: Login Request
+    API->>AUTH: Validate Credentials
+    AUTH->>TENANT: Get Tenant Context
+    TENANT-->>AUTH: Tenant Information
+    AUTH-->>API: JWT Token + Tenant ID
+    API-->>U: Authentication Response
     
-    subgraph "Network Security"
-        VPC[Private VPC]
-        SG[Security Groups]
-        NACL[Network ACLs]
-        WAF[Web Application Firewall]
-    end
-    
-    subgraph "Audit & Compliance"
-        CT[CloudTrail]
-        CW[CloudWatch]
-        GD[GuardDuty]
-        CONFIG[AWS Config]
-    end
+    U->>API: API Request + JWT
+    API->>JWT: Validate Token
+    JWT-->>API: Token Valid + Claims
+    API->>TENANT: Verify Tenant Access
+    TENANT-->>API: Access Granted
+    API->>RESOURCE: Forward Request
+    RESOURCE-->>API: Response
+    API-->>U: Final Response
 ```
 
-#### **Encryption Strategy**
+#### Role-Based Access Control (RBAC)
 
-| Data State | Encryption Method | Key Management |
-|------------|-------------------|----------------|
-| **Data at Rest** | AES-256 | Organization-specific KMS keys |
-| **Data in Transit** | TLS 1.3 | Certificate rotation |
-| **Data in Processing** | Spark encryption | Runtime key generation |
-| **Backups** | Server-side encryption | Cross-region key replication |
+**Tenant Roles**:
+- **Tenant Admin**: Full access to tenant resources
+- **Data Engineer**: Pipeline and connector management
+- **Data Analyst**: Read-only access to processed data
+- **Data Steward**: Data quality and governance operations
 
-#### **Access Control Matrix**
+**System Roles**:
+- **Platform Admin**: Cross-tenant administration
+- **Support User**: Read-only troubleshooting access
+- **Auditor**: Audit log and compliance reporting access
 
-| Role | Pipeline | Data | Secrets | Infrastructure |
-|------|----------|------|---------|----------------|
-| **Admin** | Full CRUD | Full access | Manage all | Read/Write |
-| **Engineer** | CRUD own org | Read/Write own org | Read own org | Read only |
-| **Analyst** | Read/Execute | Read own org | None | None |
-| **Viewer** | Read only | Read own org | None | None |
+### Data Security
 
-## Scalability & Performance
+#### Encryption Strategy
 
-### Auto-Scaling Architecture
+**At Rest**:
+- S3 bucket encryption with KMS keys
+- Database encryption (RDS, Redis)
+- EBS volume encryption
+- Secrets Manager encryption
+
+**In Transit**:
+- TLS 1.3 for all API communications
+- VPC endpoints for AWS service communication
+- Encrypted Databricks cluster communication
+- mTLS for service-to-service communication
+
+#### Data Classification and Handling
+
+**Data Categories**:
+- **Public**: No restrictions
+- **Internal**: Company confidential
+- **Restricted**: PII, financial data
+- **Highly Restricted**: Healthcare, legal data
+
+**Handling Policies**:
+- Automatic PII detection and masking
+- Data retention policies by classification
+- Geographic data residency requirements
+- Access logging and monitoring
+
+### Network Security
+
+#### Network Segmentation
 
 ```mermaid
 graph TB
-    subgraph "Application Scaling"
-        ECS[ECS Auto Scaling]
+    subgraph "Public Subnet"
         ALB[Application Load Balancer]
-        TG[Target Groups]
+        NAT[NAT Gateway]
     end
     
-    subgraph "Compute Scaling"
-        DB[Databricks Auto Scaling]
-        SPOT[Spot Instance Integration]
-        QUEUE[Job Queuing]
+    subgraph "Private Subnet - Application Tier"
+        EKS[EKS Worker Nodes]
+        SERVICES[Microservices]
     end
     
-    subgraph "Storage Scaling"
-        S3[S3 Intelligent Tiering]
-        EBS[EBS Auto Scaling]
-        CACHE[ElastiCache Scaling]
+    subgraph "Private Subnet - Data Tier"
+        RDS[(PostgreSQL)]
+        REDIS[(Redis)]
     end
     
-    subgraph "Database Scaling"
-        RDS[RDS Read Replicas]
-        PROXY[RDS Proxy]
-        POOL[Connection Pooling]
+    subgraph "Databricks Subnet"
+        DB_CONTROL[Databricks Control Plane]
+        DB_DATA[Databricks Data Plane]
     end
+    
+    Internet --> ALB
+    ALB --> EKS
+    EKS --> RDS
+    EKS --> REDIS
+    EKS --> DB_CONTROL
+    DB_CONTROL --> DB_DATA
+    EKS --> NAT
+    NAT --> Internet
 ```
 
-#### **Performance Optimization Strategies**
+#### Security Groups and NACLs
+- Principle of least privilege
+- Specific port and protocol restrictions
+- Source/destination based rules
+- Regular security group auditing
 
-| Component | Optimization Technique | Expected Improvement |
-|-----------|------------------------|---------------------|
-| **Databricks** | Adaptive query execution, Z-ordering | 40-60% query performance |
-| **Storage** | Intelligent tiering, compression | 30-50% cost reduction |
-| **API** | Caching, connection pooling | 70-80% response time |
-| **Database** | Read replicas, query optimization | 50-70% throughput |
+## Tenant Isolation Strategy
 
-#### **Scaling Thresholds**
+### Compute Isolation
 
-```yaml
-scaling_policies:
-  ecs_services:
-    target_cpu_utilization: 70%
-    target_memory_utilization: 80%
-    scale_out_cooldown: 300s
-    scale_in_cooldown: 600s
-    min_capacity: 2
-    max_capacity: 50
-  
-  databricks_clusters:
-    auto_termination_minutes: 60
-    min_workers: 1
-    max_workers: 20
-    enable_elastic_disk: true
-    spot_bid_price_percent: 50
-  
-  database:
-    cpu_threshold: 80%
-    connection_threshold: 80%
-    read_replica_lag: 5s
-    max_connections: 1000
-```
+#### Databricks Workspace Isolation
+- **Dedicated workspaces** per tenant organization
+- **Separate compute clusters** with tenant-specific configurations
+- **Network isolation** through VPC peering or private endpoints
+- **Resource quotas** and cost allocation tags
 
-## Cost Management Architecture
+#### Kubernetes Namespace Isolation
+- **Tenant-specific namespaces** for application deployment
+- **Resource quotas** for CPU, memory, and storage
+- **Network policies** for inter-namespace communication
+- **Pod security policies** for container security
 
-### Cost Allocation & Chargeback
+### Data Isolation
 
-```mermaid
-graph TB
-    subgraph "Cost Collection"
-        CUR[Cost & Usage Reports]
-        TAG[Resource Tagging]
-        METRIC[Custom Metrics]
-    end
-    
-    subgraph "Cost Processing"
-        LAMBDA[Cost Processing Lambda]
-        DDB[DynamoDB Cost Store]
-        ANALYTICS[Cost Analytics]
-    end
-    
-    subgraph "Cost Reporting"
-        DASH[Cost Dashboard]
-        ALERT[Budget Alerts]
-        BILL[Chargeback Bills]
-    end
-    
-    CUR --> LAMBDA
-    TAG --> LAMBDA
-    METRIC --> LAMBDA
-    LAMBDA --> DDB
-    DDB --> ANALYTICS
-    ANALYTICS --> DASH
-    ANALYTICS --> ALERT
-    ANALYTICS --> BILL
-```
+#### Storage Isolation
+- **Separate S3 buckets** per tenant with strict IAM policies
+- **Bucket policies** preventing cross-tenant access
+- **Encryption keys** managed per tenant
+- **Access logging** and monitoring
 
-#### **Cost Allocation Tags**
+#### Database Isolation
+- **Tenant ID** in all data records
+- **Row-level security** policies
+- **Connection pooling** with tenant context
+- **Query rewriting** for automatic tenant filtering
 
-```yaml
-required_tags:
-  - key: Organization
-    values: [finance, retail, healthcare, research]
-  - key: CostCenter
-    values: [FIN-001, RET-001, HLT-001, RES-001]
-  - key: Environment
-    values: [production, staging, development]
-  - key: Service
-    values: [pipeline, catalog, connector, ui]
-  - key: Owner
-    description: "Team or individual responsible"
-  - key: Project
-    description: "Project or initiative code"
-```
+### Configuration Isolation
 
-#### **Resource Quotas**
+#### Tenant-Specific Configuration
+- **Separate configuration namespaces**
+- **Environment-specific overrides**
+- **Feature flags** per tenant
+- **Resource limit enforcement**
 
-```python
-# Organization-specific resource quotas
-organization_quotas = {
-    "finance": {
-        "databricks": {
-            "max_dbu_per_hour": 100,
-            "max_clusters": 10,
-            "max_concurrent_jobs": 20
-        },
-        "storage": {
-            "max_storage_gb": 10000,
-            "retention_days": 2555  # 7 years for compliance
-        },
-        "compute": {
-            "max_ecs_tasks": 50,
-            "max_cpu_units": 10000
-        },
-        "api": {
-            "requests_per_minute": 1000,
-            "requests_per_day": 100000
-        }
-    },
-    "retail": {
-        "databricks": {
-            "max_dbu_per_hour": 200,
-            "max_clusters": 20,
-            "max_concurrent_jobs": 50
-        },
-        "storage": {
-            "max_storage_gb": 50000,
-            "retention_days": 1825  # 5 years
-        },
-        "compute": {
-            "max_ecs_tasks": 100,
-            "max_cpu_units": 20000
-        },
-        "api": {
-            "requests_per_minute": 2000,
-            "requests_per_day": 200000
-        }
-    }
-}
-```
+#### Secrets Management
+- **Tenant-scoped secrets** in AWS Secrets Manager
+- **Automatic secret rotation**
+- **Audit trail** for secret access
+- **Encryption at rest and in transit**
 
-## Technology Stack
+## Scalability and Performance
 
-### Core Technologies
+### Horizontal Scaling
 
-```mermaid
-graph TB
-    subgraph "Presentation Tier"
-        REACT[React 18]
-        TS[TypeScript]
-        MUI[Material-UI]
-        CHART[Chart.js]
-    end
-    
-    subgraph "API Tier"
-        FASTAPI[FastAPI]
-        PYDANTIC[Pydantic]
-        SQLALCHEMY[SQLAlchemy]
-        ALEMBIC[Alembic]
-    end
-    
-    subgraph "Processing Tier"
-        SPARK[Apache Spark 3.4]
-        DELTA[Delta Lake 2.4]
-        ICEBERG[Apache Iceberg 1.3]
-        UNITY[Unity Catalog]
-    end
-    
-    subgraph "Infrastructure Tier"
-        TERRAFORM[Terraform]
-        DOCKER[Docker]
-        KUBERNETES[Kubernetes]
-        HELM[Helm]
-    end
-```
+#### Application Scaling
+- **Kubernetes HPA** (Horizontal Pod Autoscaler)
+- **Custom metrics** based scaling
+- **Predictive scaling** using historical patterns
+- **Multi-region deployment** for global scale
 
-#### **Technology Matrix**
+#### Data Processing Scaling
+- **Databricks auto-scaling** clusters
+- **Spot instance** utilization for cost optimization
+- **Dynamic cluster** creation and termination
+- **Workload-based** resource allocation
 
-| Layer | Technology | Version | Purpose |
-|-------|------------|---------|---------|
-| **Frontend** | React | 18.x | User interface |
-| **Frontend** | TypeScript | 5.x | Type safety |
-| **Frontend** | Material-UI | 5.x | UI components |
-| **API** | FastAPI | 0.104.x | REST API framework |
-| **API** | Pydantic | 2.x | Data validation |
-| **Database** | PostgreSQL | 15.x | Metadata storage |
-| **Cache** | Redis | 7.x | Session & application cache |
-| **Processing** | Apache Spark | 3.4.x | Data processing engine |
-| **Processing** | Delta Lake | 2.4.x | Storage layer |
-| **Processing** | Apache Iceberg | 1.3.x | Table format |
-| **Orchestration** | Databricks | Latest | Managed Spark platform |
-| **Storage** | Amazon S3 | Latest | Object storage |
-| **IaC** | Terraform | 1.6.x | Infrastructure as code |
-| **Containers** | Docker | 24.x | Containerization |
-| **Orchestration** | ECS Fargate | Latest | Container orchestration |
+### Performance Optimization
 
-### Development Stack
+#### Caching Strategy
+- **Redis caching** for frequently accessed data
+- **Application-level** caching with TTL
+- **CDN integration** for static content
+- **Database query** result caching
 
-```yaml
-development_tools:
-  languages:
-    - Python 3.9+
-    - TypeScript 5.x
-    - SQL
-    - HCL (Terraform)
-  
-  frameworks:
-    backend:
-      - FastAPI
-      - SQLAlchemy
-      - Pydantic
-      - Pytest
-    frontend:
-      - React 18
-      - Material-UI
-      - React Query
-      - Jest
-  
-  data_processing:
-    - PySpark 3.4
-    - Delta Lake 2.4
-    - Apache Iceberg 1.3
-    - Unity Catalog
-  
-  infrastructure:
-    - Terraform 1.6+
-    - Docker 24+
-    - Kubernetes 1.28+
-    - Helm 3.12+
-  
-  monitoring:
-    - Prometheus
-    - Grafana
-    - CloudWatch
-    - X-Ray
-  
-  security:
-    - AWS IAM
-    - AWS KMS
-    - AWS Secrets Manager
-    - OIDC/OAuth2
-```
+#### Data Processing Optimization
+- **Columnar storage** with Parquet/Iceberg
+- **Data partitioning** strategies
+- **Query optimization** and indexing
+- **Parallel processing** with Spark
 
-## Deployment Architecture
+### Monitoring and Alerting
 
-### Multi-Environment Strategy
+#### Application Monitoring
+- **Prometheus metrics** collection
+- **Grafana dashboards** for visualization
+- **Custom business** metrics
+- **SLA monitoring** and alerting
 
-```mermaid
-graph TB
-    subgraph "Development"
-        DEV_APP[Application Services]
-        DEV_DB[Local Database]
-        DEV_SPARK[Local Spark]
-    end
-    
-    subgraph "Staging"
-        STAGE_ECS[ECS Services]
-        STAGE_RDS[RDS Instance]
-        STAGE_DATABRICKS[Staging Workspace]
-    end
-    
-    subgraph "Production"
-        PROD_ECS[ECS Cluster]
-        PROD_RDS[RDS Multi-AZ]
-        PROD_DATABRICKS[Production Workspaces]
-        PROD_DR[Disaster Recovery]
-    end
-    
-    DEV_APP --> STAGE_ECS
-    STAGE_ECS --> PROD_ECS
-    PROD_ECS --> PROD_DR
-```
+#### Infrastructure Monitoring
+- **CloudWatch** for AWS resources
+- **EKS cluster** monitoring
+- **Database performance** monitoring
+- **Network and security** monitoring
 
-#### **Environment Configuration**
+## Infrastructure Architecture
 
-| Environment | Infrastructure | Data Retention | Security Level | Cost Priority |
-|-------------|----------------|----------------|----------------|---------------|
-| **Development** | Single AZ, small instances | 7 days | Basic | Cost optimized |
-| **Staging** | Multi-AZ, production-like | 30 days | Production-like | Balanced |
-| **Production** | Multi-AZ, HA, DR | Per compliance | Maximum | Performance first |
-| **DR** | Cross-region | Full backup | Maximum | Availability first |
+### AWS Infrastructure Components
 
-### CI/CD Pipeline Architecture
+#### Core Infrastructure
+- **VPC** with public and private subnets
+- **EKS cluster** for container orchestration
+- **Application Load Balancer** for traffic distribution
+- **NAT Gateways** for outbound internet access
 
-```mermaid
-graph LR
-    subgraph "Source Control"
-        GIT[Git Repository]
-        PR[Pull Request]
-        MERGE[Merge to Main]
-    end
-    
-    subgraph "Build & Test"
-        BUILD[Build Images]
-        UNIT[Unit Tests]
-        INTEGRATION[Integration Tests]
-        SECURITY[Security Scan]
-    end
-    
-    subgraph "Deploy Pipeline"
-        STAGING[Deploy Staging]
-        E2E[E2E Tests]
-        APPROVE[Manual Approval]
-        PRODUCTION[Deploy Production]
-    end
-    
-    GIT --> PR
-    PR --> BUILD
-    BUILD --> UNIT
-    UNIT --> INTEGRATION
-    INTEGRATION --> SECURITY
-    SECURITY --> STAGING
-    STAGING --> E2E
-    E2E --> APPROVE
-    APPROVE --> PRODUCTION
-```
+#### Data Infrastructure
+- **S3 buckets** for data lake storage
+- **RDS PostgreSQL** for application database
+- **ElastiCache Redis** for caching and sessions
+- **Databricks workspaces** for data processing
 
-#### **Deployment Strategies**
+#### Security Infrastructure
+- **IAM roles and policies** for access control
+- **Secrets Manager** for credential management
+- **Certificate Manager** for TLS certificates
+- **CloudTrail** for audit logging
 
-```yaml
-deployment_strategies:
-  blue_green:
-    enabled: true
-    health_check_grace_period: 300s
-    rollback_on_failure: true
-    traffic_shifting:
-      - percentage: 10
-        duration: 300s
-      - percentage: 50
-        duration: 600s
-      - percentage: 100
-        
-  canary:
-    enabled: true
-    canary_percentage: 10
-    canary_duration: 1800s
-    success_threshold: 99%
-    
-  rolling:
-    enabled: true
-    max_unavailable: 25%
-    max_surge: 25%
-    rolling_update_period: 30s
-```
+### Disaster Recovery and Backup
 
-### Disaster Recovery Architecture
+#### Backup Strategy
+- **Automated RDS backups** with point-in-time recovery
+- **S3 cross-region replication** for data durability
+- **EBS snapshots** for persistent volumes
+- **Configuration backup** in version control
 
-```mermaid
-graph TD
-    subgraph Primary["Primary Region us-east-1"]
-        PRIMARY_ECS[ECS Cluster]
-        PRIMARY_RDS[RDS Primary]
-        PRIMARY_S3[S3 Primary]
-        PRIMARY_DATABRICKS[Databricks Primary]
-    end
-    
-    subgraph DR["DR Region us-west-2"]
-        DR_ECS[ECS Cluster Standby]
-        DR_RDS[RDS Read Replica]
-        DR_S3[S3 Cross-Region Replication]
-        DR_DATABRICKS[Databricks DR]
-    end
-    
-    subgraph Backup["Backup Strategy"]
-        BACKUP_RDS[Automated DB Backups]
-        BACKUP_S3[S3 Versioning]
-        BACKUP_CONFIG[Configuration Backups]
-    end
-    
-    PRIMARY_RDS --> DR_RDS
-    PRIMARY_S3 --> DR_S3
-    PRIMARY_ECS -.-> DR_ECS
-    PRIMARY_DATABRICKS -.-> DR_DATABRICKS
-    
-    PRIMARY_RDS --> BACKUP_RDS
-    PRIMARY_S3 --> BACKUP_S3
-```
+#### Recovery Procedures
+- **RTO (Recovery Time Objective)**: 4 hours
+- **RPO (Recovery Point Objective)**: 1 hour
+- **Multi-AZ deployment** for high availability
+- **Automated failover** mechanisms
 
-#### **Recovery Objectives**
+## Integration Architecture
 
-| Component | RTO (Recovery Time) | RPO (Recovery Point) | Strategy |
-|-----------|---------------------|---------------------|----------|
-| **Application Services** | 15 minutes | 5 minutes | Blue/Green deployment |
-| **Database** | 30 minutes | 1 minute | Read replica promotion |
-| **Object Storage** | 5 minutes | 15 minutes | Cross-region replication |
-| **Databricks** | 60 minutes | 30 minutes | Workspace recreation |
-| **Configuration** | 10 minutes | Real-time | Git-based recovery |
+### External System Integration
 
-### Security Architecture Details
+#### Data Platform Integration
+- **Apache Iceberg** for cross-platform compatibility
+- **Unity Catalog** for centralized metadata
+- **Delta Lake** for ACID transactions
+- **Open table formats** for vendor neutrality
 
-#### **Network Security**
+#### API Integration
+- **RESTful APIs** with OpenAPI specifications
+- **GraphQL** for flexible data querying
+- **Webhook support** for event notifications
+- **Rate limiting** and throttling
 
-```yaml
-network_security:
-  vpc:
-    cidr: "10.0.0.0/16"
-    enable_dns_hostnames: true
-    enable_dns_support: true
-    
-  subnets:
-    public:
-      - cidr: "10.0.1.0/24"  # AZ-a
-      - cidr: "10.0.2.0/24"  # AZ-b
-      - cidr: "10.0.3.0/24"  # AZ-c
-    private:
-      - cidr: "10.0.11.0/24"  # AZ-a
-      - cidr: "10.0.12.0/24"  # AZ-b
-      - cidr: "10.0.13.0/24"  # AZ-c
-    database:
-      - cidr: "10.0.21.0/24"  # AZ-a
-      - cidr: "10.0.22.0/24"  # AZ-b
-      - cidr: "10.0.23.0/24"  # AZ-c
-  
-  security_groups:
-    alb:
-      ingress:
-        - port: 80
-          protocol: tcp
-          cidr: "0.0.0.0/0"
-        - port: 443
-          protocol: tcp
-          cidr: "0.0.0.0/0"
-    
-    ecs_tasks:
-      ingress:
-        - port: 3000-3010
-          protocol: tcp
-          source_security_group: alb
-      egress:
-        - port: 0
-          protocol: -1
-          cidr: "0.0.0.0/0"
-    
-    database:
-      ingress:
-        - port: 5432
-          protocol: tcp
-          source_security_group: ecs_tasks
-        - port: 5432
-          protocol: tcp
-          source_security_group: databricks
-```
+#### Third-Party Integrations
+- **Identity Providers** (SAML, OIDC)
+- **Monitoring tools** (DataDog, New Relic)
+- **BI platforms** (Tableau, PowerBI, Looker)
+- **Data catalogs** (Apache Atlas, DataHub)
 
-#### **Data Classification & Governance**
+### Event-Driven Architecture
 
-```yaml
-data_classification:
-  levels:
-    public:
-      description: "Data that can be shared publicly"
-      retention: "1 year"
-      encryption: "standard"
-      access: "all authenticated users"
-      
-    internal:
-      description: "Internal business data"
-      retention: "3 years"
-      encryption: "enhanced"
-      access: "organization members"
-      
-    confidential:
-      description: "Sensitive business data"
-      retention: "7 years"
-      encryption: "high"
-      access: "authorized users only"
-      backup_frequency: "daily"
-      
-    restricted:
-      description: "Highly sensitive data (PII, PHI)"
-      retention: "per regulation"
-      encryption: "maximum"
-      access: "role-based approval"
-      backup_frequency: "real-time"
-      audit_all_access: true
-      data_masking: true
+#### Event Streaming
+- **Apache Kafka** for event streaming
+- **AWS EventBridge** for serverless events
+- **Event schemas** and registry
+- **Dead letter queues** for error handling
 
-governance_policies:
-  pii_detection:
-    enabled: true
-    patterns:
-      - social_security_number
-      - credit_card_number
-      - email_address
-      - phone_number
-    actions:
-      - mask_in_non_production
-      - encrypt_at_rest
-      - audit_access
-      
-  compliance_frameworks:
-    gdpr:
-      enabled: true
-      data_retention_days: 2555  # 7 years
-      right_to_be_forgotten: true
-      consent_tracking: true
-      
-    hipaa:
-      enabled: true
-      encryption_required: true
-      audit_trail: true
-      access_controls: strict
-      
-    sox:
-      enabled: true
-      financial_data_controls: true
-      change_management: true
-      audit_requirements: enhanced
-```
+#### Microservices Communication
+- **Synchronous**: REST APIs for real-time operations
+- **Asynchronous**: Message queues for background processing
+- **Event sourcing**: For audit trails and state reconstruction
+- **CQRS pattern**: Separate read and write models
 
-### Performance Tuning Guidelines
+## Monitoring and Observability
 
-#### **Databricks Optimization**
+### Metrics and Monitoring
 
-```python
-# Spark configuration for optimal performance
-spark_config = {
-    # Adaptive Query Execution
-    "spark.sql.adaptive.enabled": "true",
-    "spark.sql.adaptive.coalescePartitions.enabled": "true",
-    "spark.sql.adaptive.skewJoin.enabled": "true",
-    
-    # Delta Lake optimization
-    "spark.databricks.delta.optimizeWrite.enabled": "true",
-    "spark.databricks.delta.autoCompact.enabled": "true",
-    "spark.databricks.delta.retentionDurationCheck.enabled": "false",
-    
-    # Memory optimization
-    "spark.sql.adaptive.advisoryPartitionSizeInBytes": "134217728",  # 128MB
-    "spark.sql.adaptive.maxNumPostShufflePartitions": "200",
-    "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
-    
-    # Network optimization
-    "spark.sql.adaptive.localShuffleReader.enabled": "true",
-    "spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes": "268435456",
-    
-    # Iceberg optimization
-    "spark.sql.iceberg.vectorization.enabled": "true",
-    "spark.sql.iceberg.planning.preserveDataGrouping": "true"
-}
+#### Business Metrics
+- **Pipeline execution** success rates
+- **Data quality** scores and trends
+- **Resource utilization** by tenant
+- **Cost allocation** and chargeback
 
-# Organization-specific cluster sizing
-def get_cluster_config(organization, workload_type):
-    base_configs = {
-        "finance": {
-            "node_type": "i3.xlarge",
-            "min_workers": 2,
-            "max_workers": 10
-        },
-        "retail": {
-            "node_type": "i3.2xlarge", 
-            "min_workers": 5,
-            "max_workers": 20
-        },
-        "healthcare": {
-            "node_type": "r5.xlarge",  # Memory optimized for large datasets
-            "min_workers": 1,
-            "max_workers": 8
-        }
-    }
-    
-    workload_adjustments = {
-        "streaming": {"min_workers": 3, "enable_autoscaling": True},
-        "batch_large": {"max_workers": 50, "spot_percentage": 80},
-        "interactive": {"min_workers": 1, "auto_termination_minutes": 60}
-    }
-    
-    config = base_configs[organization].copy()
-    config.update(workload_adjustments.get(workload_type, {}))
-    
-    return config
-```
+#### Technical Metrics
+- **Application performance** (latency, throughput)
+- **Infrastructure health** (CPU, memory, disk)
+- **Database performance** (query time, connections)
+- **Network performance** (bandwidth, packet loss)
 
-#### **Database Performance Tuning**
+### Logging Strategy
 
-```sql
--- PostgreSQL optimization for multi-tenant workloads
--- Connection pooling settings
-ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';
-ALTER SYSTEM SET max_connections = 1000;
-ALTER SYSTEM SET shared_buffers = '4GB';
-ALTER SYSTEM SET effective_cache_size = '12GB';
-ALTER SYSTEM SET work_mem = '16MB';
-ALTER SYSTEM SET maintenance_work_mem = '512MB';
+#### Centralized Logging
+- **CloudWatch Logs** for application logs
+- **Structured logging** with JSON format
+- **Log aggregation** and correlation
+- **Log retention** policies
 
--- Index optimization for tenant isolation
-CREATE INDEX CONCURRENTLY idx_pipelines_org_id ON pipelines(organization_id);
-CREATE INDEX CONCURRENTLY idx_pipeline_runs_org_id_status ON pipeline_runs(organization_id, status);
-CREATE INDEX CONCURRENTLY idx_catalog_entries_org_id_type ON catalog_entries(organization_id, table_type);
+#### Audit Logging
+- **Data access** audit trails
+- **Administrative actions** logging
+- **Security events** monitoring
+- **Compliance reporting** automation
 
--- Partitioning strategy for large tables
-CREATE TABLE pipeline_runs_partitioned (
-    LIKE pipeline_runs INCLUDING ALL
-) PARTITION BY HASH (organization_id);
+### Alerting Framework
 
--- Create partitions for each organization
-CREATE TABLE pipeline_runs_finance PARTITION OF pipeline_runs_partitioned
-    FOR VALUES WITH (MODULUS 4, REMAINDER 0);
-CREATE TABLE pipeline_runs_retail PARTITION OF pipeline_runs_partitioned  
-    FOR VALUES WITH (MODULUS 4, REMAINDER 1);
-CREATE TABLE pipeline_runs_healthcare PARTITION OF pipeline_runs_partitioned
-    FOR VALUES WITH (MODULUS 4, REMAINDER 2);
-```
+#### Alert Categories
+- **Critical**: Service outages, security breaches
+- **Warning**: Performance degradation, quota approaching
+- **Info**: Successful deployments, scheduled maintenance
 
-## Conclusion
+#### Notification Channels
+- **Email alerts** for critical issues
+- **Slack integration** for team notifications
+- **PagerDuty** for on-call escalation
+- **Webhook** for custom integrations
 
-This architecture provides a robust, scalable, and secure foundation for multi-tenant data ingestion and processing. The design ensures:
+### Performance Tuning
 
-1. **Complete tenant isolation** while maximizing resource efficiency
-2. **Enterprise-grade security** with zero-trust principles
-3. **Cost optimization** through intelligent resource allocation
-4. **Cross-platform interoperability** via standardized table formats
-5. **Operational excellence** through comprehensive monitoring and automation
+#### Application Performance
+- **Code profiling** and optimization
+- **Database query** optimization
+- **Caching strategy** refinement
+- **Resource allocation** tuning
 
-The modular design allows for independent scaling and evolution of components while maintaining backward compatibility and system reliability.
+#### Infrastructure Performance
+- **Auto-scaling** configuration
+- **Load balancing** optimization
+- **Network performance** tuning
+- **Storage optimization**
 
----
+## Deployment and Operations
 
-**Next Steps:**
-- Review [Deployment Guide](DEPLOYMENT.md) for implementation details
-- Explore [API Reference](API_REFERENCE.md) for integration options
-- Check [User Guide](USER_GUIDE.md) for operational procedures
+### CI/CD Pipeline
+
+#### Continuous Integration
+- **GitHub Actions** for automated testing
+- **Unit and integration** tests
+- **Security scanning** (SAST, DAST)
+- **Code quality** analysis
+
+#### Continuous Deployment
+- **GitOps** with ArgoCD
+- **Blue-green deployments**
+- **Canary releases**
+- **Rollback mechanisms**
+
+### Configuration Management
+
+#### Infrastructure as Code
+- **Terraform** for infrastructure provisioning
+- **Helm charts** for Kubernetes deployments
+- **Environment-specific** configurations
+- **Version control** for all configurations
+
+#### Application Configuration
+- **ConfigMaps** for non-sensitive configuration
+- **Secrets** for sensitive data
+- **Environment variables** for runtime configuration
+- **Feature flags** for gradual rollouts
+
+This architecture provides a robust, scalable, and secure foundation for multi-tenant data ingestion while maintaining clear separation of concerns and following cloud-native best practices.
