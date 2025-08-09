@@ -1,46 +1,86 @@
-# Core Framework
+# Core Framework Dependencies
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic==2.5.0
 pydantic-settings==2.1.0
 
-# Database
+# Database and ORM
 sqlalchemy==2.0.23
-alembic==1.13.0
-asyncpg==0.29.0
+alembic==1.13.1
+psycopg2-binary==2.9.9
 redis==5.0.1
 
-# Authentication & Security
+# Databricks and Spark Integration
+databricks-sdk==0.12.0
+databricks-cli==0.18.0
+pyspark==3.5.0
+delta-spark==3.0.0
+
+# Apache Iceberg Support
+pyiceberg==0.5.1
+
+# Cloud Provider SDKs
+boto3==1.34.0
+botocore==1.34.0
+azure-storage-blob==12.19.0
+google-cloud-storage==2.10.0
+
+# Authentication and Security
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-multipart==0.0.6
+cryptography==41.0.8
 
-# AWS Services
-boto3==1.34.0
-botocore==1.34.0
+# HTTP and API Client Libraries
+httpx==0.25.2
+requests==2.31.0
+aiohttp==3.9.1
 
-# Databricks
-databricks-sql-connector==3.0.0
-databricks-cli==0.214.0
-
-# Data Processing
+# Data Processing and Validation
 pandas==2.1.4
-pyarrow==14.0.2
-delta-spark==3.0.0
+numpy==1.25.2
+pyarrow==14.0.1
+jsonschema==4.20.0
 
-# Testing
+# Configuration Management
+python-dotenv==1.0.0
+pyyaml==6.0.1
+toml==0.10.2
+
+# Logging and Monitoring
+structlog==23.2.0
+prometheus-client==0.19.0
+
+# Background Tasks and Scheduling
+celery==5.3.4
+kombu==5.3.4
+
+# Testing Dependencies
 pytest==7.4.3
 pytest-asyncio==0.21.1
-pytest-cov==4.1.0
-httpx==0.25.2
+pytest-mock==3.12.0
+httpx==0.25.2  # For testing FastAPI endpoints
 
-# Monitoring
-prometheus-client==0.19.0
-structlog==23.2.0
-
-# Development
+# Development and Code Quality
 black==23.11.0
 isort==5.12.0
 flake8==6.1.0
 mypy==1.7.1
-pre-commit==3.6.0
+
+# Multi-tenant Specific
+django-multitenant==3.0.0  # If using Django components
+tenant-schemas-postgresql==2.0.0  # Alternative tenant management
+
+# Message Queue (if using)
+pika==1.3.2  # RabbitMQ
+kafka-python==2.0.2  # Apache Kafka
+
+# Workflow Orchestration
+apache-airflow==2.7.3  # If using Airflow
+prefect==2.14.11  # Alternative orchestration
+
+# Additional Utilities
+click==8.1.7
+rich==13.7.0
+typer==0.9.0
+loguru==0.7.0
