@@ -180,7 +180,7 @@ class AuditLog(Base):
 # Pydantic Models for API
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=100)
-    email: str = Field(..., regex=r'^[^@]+@[^@]+\.[^@]+)
+    email: str = Field(..., regex=r'^[^@]+@[^@]+\.[^@]+$')  # Fixed regex
     password: str = Field(..., min_length=8)
     full_name: str = Field(..., min_length=1, max_length=200)
     organization_id: str

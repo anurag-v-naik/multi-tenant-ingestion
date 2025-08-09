@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from typing import Optional
 import logging
 import time
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine
 import uuid
 from .database import SessionLocal
 from ..models.audit import AuditLog

@@ -43,3 +43,11 @@ app.include_router(connections.router, prefix="/api/v1/connections", tags=["conn
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "connector-service"}
+
+from .core.config import Settings
+
+def get_settings():
+    return Settings()
+
+# Add proper middleware imports
+from .core.middleware import TenantContextMiddleware
