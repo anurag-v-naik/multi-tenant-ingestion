@@ -1,5 +1,10 @@
 name: Continuous Integration
 
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
 on:
   push:
     branches: [ main, develop ]
@@ -97,7 +102,7 @@ jobs:
         name: codecov-umbrella
     
     - name: Upload test results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: test-results-${{ matrix.python-version }}
@@ -263,7 +268,7 @@ jobs:
         output: 'trivy-results.sarif'
     
     - name: Upload Trivy scan results to GitHub Security tab
-      uses: github/codeql-action/upload-sarif@v2
+      uses: github/codeql-action/upload-sarif@v3
       if: always()
       with:
         sarif_file: 'trivy-results.sarif'
